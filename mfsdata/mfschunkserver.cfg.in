@@ -32,8 +32,15 @@
 # alternate location/name of mfshdd.cfg file (default is @ETC_PATH@/mfs/mfshdd.cfg)
 # HDD_CONF_FILENAME = @ETC_PATH@/mfs/mfshdd.cfg
 
-# chunk test period in seconds (default is 10)
-# HDD_TEST_FREQ = 10
+# Speed of background chunk tests in MB/s per disk (formally entry defined in mfshdd.cfg). Value can be given as a decimal number (default is 1.0)
+# Deprecates: HDD_TEST_FREQ (if HDD_TEST_SPEED is not defined, but there is redefined HDD_TEST_FREQ, then HDD_TEST_SPEED = 10 / HDD_TEST_FREQ)
+# HDD_TEST_SPEED = 1.0
+
+# Do not test chunk integrity when last I/O (including test) was performed less than HDD_MIN_TEST_INTERVAL seconds ago.
+# HDD_MIN_TEST_INTERVAL = 86400
+
+# If possible use posix_fadvise(POSIX_DONTNEED) after each chunk test (but only if last I/O operation was performed more than HDD_FADVISE_MIN_TIME seconds ago). Using zero will always perform posix_fadvise (flush cache) and using negative value will never flush cache after tests. This setting is valid only for systems that support posix_fadivise.
+# HDD_FADVISE_MIN_TIME = 86400
 
 # how much space should be left unused on each hard drive (default: 256MiB)
 # number format: [0-9]*(.[0-9]*)?([kMGTPE]|[KMGTPE]i)?B?
@@ -42,6 +49,9 @@
 
 # percent of total work time the chunkserver is allowed to spend on hdd space rebalancing
 # HDD_REBALANCE_UTILIZATION = 20
+
+# maximum simultaneous writes in high speed disk rebalance (0 means use standard rebalance)
+# HDD_HIGH_SPEED_REBALANCE_LIMIT = 0
 
 # How many i/o errors (COUNT) to tolerate in given amount of seconds (PERIOD) on a single hard drive; if the number of errors exceeds this setting, the offending hard drive will be marked as damaged
 # HDD_ERROR_TOLERANCE_COUNT = 2
@@ -74,8 +84,8 @@
 # MASTER_PORT = @DEFAULT_MASTER_CS_PORT@
 
 
-# timeout in seconds for master connections (default is 10)
-# MASTER_TIMEOUT = 10
+# timeout in seconds for master connections. Value >0 forces given timeout, but when value is 0 then CS asks master for timeout (default is 0 - ask master)
+# MASTER_TIMEOUT = 0
 
 # delay in seconds before next try to reconnect to master if not connected (default is 5)
 # MASTER_RECONNECTION_DELAY = 5

@@ -49,6 +49,12 @@
 # due to logs being kept in 5k blocks; zero disables extra logs storage)
 # CHANGELOG_PRESERVE_SECONDS = 1800
 
+# Changelog save mode. There are three modes of writing changelogs:
+# 0 - write in background by different process (less safe, but doesn't make master stop in case of heavy hdd load)
+# 1 - write in foreground without syncing data (master waits for every changelog to be saved to hdd, but without syncing - a little more safe than the background option, but may cause master to stop and wait for flushing hdd buffers)
+# 2 - write in foreground with fsync after each write (very safe, but may make your master very slow unless you have very sophisticated hardware)
+# CHANGELOG_SAVE_MODE = 0
+
 # how many missing chunks will be stored in master (up to 100*MISSING_LOG_CAPACITY bytes of memory will be allocated)
 # MISSING_LOG_CAPACITY = 100000
 
@@ -82,7 +88,7 @@
 # After reload currently connected chunkservers are NOT disconnected. New AUTH_CODE will be used when chunkservers will make new connection.
 # AUTH_CODE = mfspassword
 
-# Optional IP class remapping. If you want to use class A for communication with master and class B for I/O (communcation with chunkservers) then define class A as REMAP_SOURCE_IP_CLASS and class B as REMAP_DESTINATION_IP_CLASS.
+# Optional IP class remapping. If you want to use class A for communication with master and class B for I/O (communication with chunkservers) then define class A as REMAP_SOURCE_IP_CLASS and class B as REMAP_DESTINATION_IP_CLASS.
 # You must also define REMAP_BITS which means how many of first bits of class A should be changed to bits from class B. All chunkserver IP numbers that are not in class A will stay unchanged.
 # REMAP_BITS = 24
 # REMAP_SOURCE_IP_CLASS = 192.168.1.0
@@ -92,9 +98,20 @@
 # CHUNKSERVER WORKING OPTIONS                 #
 ###############################################
 
-# initial delay in seconds before starting replications (default is 300)
-# REPLICATIONS_DELAY_INIT = 300
+# initial delay in seconds before starting replications (default is 60)
+# REPLICATIONS_DELAY_INIT = 60
 
+# whether to make undergoal replications respect topology (default is 0)
+# 0 - do not respect topology
+# 1 - pick destination server at random, but then choose best source server
+# 2 - try to find destination server in the same rack as one of the existing copies and then replicate chunk locally (in the same rack)
+# REPLICATIONS_RESPECT_TOPOLOGY = 0
+
+# avoid using same ip/rack for different chunk copies
+# 0 - ignore ip and rackid (standard behaviour)
+# 1 - avoid storing more than one copy on chunkservers using same IP number
+# 2 - avoid storing more than one copy on chunkservers using IP number from the same rack id
+# CHUNKS_UNIQUE_MODE = 0
 
 # Chunks loop shouldn't check more chunks per seconds than given number (default is 100000)
 # CHUNKS_LOOP_MAX_CPS = 100000
@@ -122,8 +139,8 @@
 # limit groups are the same as in write limit, also relations between numbers should be the same as in write limits ( 1st >= 2nd >= 3rd <= 4th )
 # CHUNKS_READ_REP_LIMIT = 10,5,2,5
 
-# Threshold for chunkserver load (default is 100)
-# CS_HEAVY_LOAD_THRESHOLD = 100
+# Threshold for chunkserver load (default is 150)
+# CS_HEAVY_LOAD_THRESHOLD = 150
 
 # Threshold ratio for chunkserver load (default is 5.0, Whenever chunkserver load is higher than previously specified threshold and this ratio times higher than average load, then chunkserver is switched into 'grace' mode)
 # CS_HEAVY_LOAD_RATIO_THRESHOLD = 5.0
@@ -161,6 +178,10 @@
 # How long to sustain a disconnected client session (in seconds; default is 86400 = 1 day)
 # SESSION_SUSTAIN_TIME = 86400
 
+###############################################
+# FILE SYSTEM OPTIONS                         #
+###############################################
+
 # Default grace period in seconds for soft quota (default is 604800 - 7 days)
 # Deprecates: QUOTA_TIME_LIMIT
 # QUOTA_DEFAULT_GRACE_PERIOD = 604800
@@ -173,3 +194,10 @@
 #  3 - Same as above but only in case of files. In case of folders and symlinks do not modify atime.
 #  4 - Never modify atime during access (like "noatime" option).
 # ATIME_MODE = 0
+
+# Define amount of space reserved for superuser only (default is 0)
+#  #B or #    - amount defined in bytes (you can use metric prefixes - SI and IEC binary prefixes)
+#  #% or #.#% - amount defined as a percent of total space
+#  #U or #.#U - amount in multiplies of 'max bytes currently used by one of chunkservers'
+#  #C or #.#C - amount in multiplies of 'max total bytes of chunkserver - the highest capacity of one chunkserver'
+# RESERVE_SPACE = 0

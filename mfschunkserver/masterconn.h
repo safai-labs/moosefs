@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -26,7 +26,8 @@
 void masterconn_stats(uint64_t *bin,uint64_t *bout);
 uint16_t masterconn_getcsid(void);
 uint64_t masterconn_getmetaid(void);
-void masterconn_setmetaid(uint64_t metaid);
+uint64_t masterconn_gethddmetaid();
+void masterconn_sethddmetaid(uint64_t metaid);
 uint32_t masterconn_getmasterip(void);
 uint16_t masterconn_getmasterport(void);
 // void masterconn_replicate_status(uint64_t chunkid,uint32_t version,uint8_t status);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -265,6 +265,7 @@
 #define LOOKUP_ACCESS_MODE_RWX             0x0080
 #define LOOKUP_ACCESS_BITS                 0x00FF
 #define LOOKUP_CHUNK_ZERO_DATA             0x0100
+#define LOOKUP_RO_FILESYSTEM               0x0200
 
 // combinations of MODE_MASK to LOOKUP_ACCESS_MODE
 #define MODE_TO_ACCMODE {0x01,0x03,0x05,0x0F,0x11,0x33,0x55,0xFF}
@@ -496,6 +497,7 @@
 // CLTOMA_FUSE_READ_CHUNK,CLTOMA_FUSE_WRITE_CHUNK,CLTOMA_FUSE_WRITE_CHUNK_END - chunkopflags
 #define CHUNKOPFLAG_CANMODTIME             1
 #define CHUNKOPFLAG_CONTINUEOP             2
+#define CHUNKOPFLAG_CANUSERESERVESPACE     4
 
 #define MODULE_TYPE_UNKNOWN                0
 #define MODULE_TYPE_MASTER                 1
@@ -512,7 +514,7 @@
 #define ATTR_RECORD_SIZE                   36
 
 #define CSTOMA_MAXPACKETSIZE 500000000
-#define CLTOMA_MAXPACKETSIZE 1000000
+#define CLTOMA_MAXPACKETSIZE 50000000
 #define ANTOMA_MAXPACKETSIZE 1500000
 #define MATOAN_MAXPACKETSIZE 1500000
 #define MATOCS_MAXPACKETSIZE 10000
@@ -699,10 +701,7 @@
 
 // 0x0096
 #define MATOCS_REPLICATE (PROTO_BASE+150)
-// simple copy:
-//  chunkid:64 version:32 ip:32 port:16
-// raid copy (make new chunk as XOR of different parts of couple of chunks - using xormasks)
-//  chunkid:64 version:32 4 * [ xormask:32 ] N * [chunkid:64 version:32 ip:32 port:16]
+// chunkid:64 version:32 ip:32 port:16
 
 // 0x0097
 #define CSTOMA_REPLICATE (PROTO_BASE+151)
@@ -740,7 +739,6 @@
 // 0x00AB
 #define CSTOMA_DUPTRUNC (PROTO_BASE+171)
 // chunkid:64 status:8
-
 
 
 
@@ -969,10 +967,8 @@
 
 // 0x0193
 #define MATOCL_FUSE_STATFS (PROTO_BASE+403)
-// deprecated:
-//	msgid:32 totalspace:64 availspace:64 trashspace:64 inodes:32
-// current:
-//	msgid:32 totalspace:64 availspace:64 trashspace:64 sustainedspace:64 inodes:32
+// msgid:32 totalspace:64 availspace:64 trashspace:64 sustainedspace:64 inodes:32 - version < 3.0.102 (and < 4.9.0 in 4.x)
+// msgid:32 totalspace:64 availspace:64 freespace:64 trashspace:64 sustainedspace:64 inodes:32
 
 // 0x0194
 #define CLTOMA_FUSE_ACCESS (PROTO_BASE+404)
@@ -1782,8 +1778,10 @@
 #define MATOCL_FUSE_TIME_SYNC (PROTO_BASE+705)
 // [ msgid:32 ] timestamp_useconds:64
 
+#define MATOCL_FUSE_INVALIDATE_CHUNK_CACHE (PROTO_BASE+706)
+// zero:32
 
-// #define MATOCL_FUSE_INVALIDATE_DATA_CACHE (PROTO_BASE+704)
+// #define MATOCL_FUSE_INVALIDATE_DATA_CACHE (PROTO_BASE+707)
 // zero:32 inode:32
 
 

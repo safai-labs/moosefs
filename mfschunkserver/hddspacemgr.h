@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -25,7 +25,7 @@
 
 #include "MFSCommunication.h"
 
-void hdd_stats(uint64_t *br,uint64_t *bw,uint32_t *opr,uint32_t *opw,uint32_t *dbr,uint32_t *dbw,uint32_t *dopr,uint32_t *dopw,uint64_t *rtime,uint64_t *wtime);
+void hdd_stats(uint64_t *br,uint64_t *bw,uint32_t *opr,uint32_t *opw,uint32_t *dbr,uint32_t *dbw,uint32_t *dopr,uint32_t *dopw,uint32_t *movl,uint32_t *movh,uint64_t *rtime,uint64_t *wtime);
 void hdd_op_stats(uint32_t *op_create,uint32_t *op_delete,uint32_t *op_version,uint32_t *op_duplicate,uint32_t *op_truncate,uint32_t *op_duptrunc,uint32_t *op_test);
 uint32_t hdd_errorcounter(void);
 
@@ -61,6 +61,9 @@ uint8_t hdd_is_rebalance_on(void);
 /* emergency chunk read - ignore errors, do retries */
 int hdd_emergency_read(uint64_t chunkid,uint32_t *version,uint16_t blocknum,uint8_t buffer[MFSBLOCKSIZE],uint8_t retries,uint8_t *errorflags);
 
+/* precache data */
+void hdd_precache_data(uint64_t chunkid,uint32_t offset,uint32_t size);
+
 /* I/O operations */
 int hdd_open(uint64_t chunkid,uint32_t version);
 int hdd_close(uint64_t chunkid);
@@ -72,6 +75,8 @@ int hdd_write(uint64_t chunkid,uint32_t version,uint16_t blocknum,const uint8_t 
 int hdd_get_blocks(uint64_t chunkid,uint32_t version,uint8_t *blocks_buff);
 int hdd_get_checksum(uint64_t chunkid, uint32_t version, uint8_t *checksum_buff);
 int hdd_get_checksum_tab(uint64_t chunkid, uint32_t version, uint8_t *checksum_tab);
+
+int hdd_move(void *fsrcv,void *fdstv);
 
 /* chunk operations */
 
@@ -92,6 +97,9 @@ int hdd_chunkop(uint64_t chunkid,uint32_t version,uint32_t newversion,uint64_t c
 #define hdd_truncate(_chunkid,_version,_newversion,_length) (((_newversion)>0&&(_length)!=0xFFFFFFFF)?hdd_chunkop(_chunkid,_version,_newversion,0,0,_length):MFS_ERROR_EINVAL)
 #define hdd_duplicate(_chunkid,_version,_newversion,_copychunkid,_copyversion) (((_newversion>0)&&(_copychunkid)>0)?hdd_chunkop(_chunkid,_version,_newversion,_copychunkid,_copyversion,0xFFFFFFFF):MFS_ERROR_EINVAL)
 #define hdd_duptrunc(_chunkid,_version,_newversion,_copychunkid,_copyversion,_length) (((_newversion>0)&&(_copychunkid)>0&&(_length)!=0xFFFFFFFF)?hdd_chunkop(_chunkid,_version,_newversion,_copychunkid,_copyversion,_length):MFS_ERROR_EINVAL)
+
+/* meta id */
+void hdd_setmetaid(uint64_t metaid);
 
 /* initialization */
 int hdd_late_init(void);

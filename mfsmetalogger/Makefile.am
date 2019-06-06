@@ -8,6 +8,7 @@ mfsmetalogger_SOURCES= \
 	masterconn.c masterconn.h \
 	init.h \
 	../mfscommon/main.c ../mfscommon/main.h \
+	../mfscommon/processname.c ../mfscommon/processname.h \
 	../mfscommon/clocks.c ../mfscommon/clocks.h \
 	../mfscommon/cfg.c ../mfscommon/cfg.h \
 	../mfscommon/crc.c ../mfscommon/crc.h \
@@ -17,10 +18,8 @@ mfsmetalogger_SOURCES= \
 	../mfscommon/slogger.h ../mfscommon/mfsalloc.h \
 	../mfscommon/MFSCommunication.h
 
-mfsmetalogger_LDFLAGS=$(ZLIB_LIBS)
-
 mfsmetalogger_CPPFLAGS=$(AM_CPPFLAGS) -DAPPNAME=mfsmetalogger
 
-distclean:distclean-am
+distclean-local:distclean-am
 	-rm -rf ./$(DEPDIR)
 	-rm -f Makefile

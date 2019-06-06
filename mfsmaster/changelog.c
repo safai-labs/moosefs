@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -34,8 +34,9 @@
 #include "changelog.h"
 #include "metadata.h"
 #include "massert.h"
-
+#include "bgsaver.h"
 #include "main.h"
+#include "slogger.h"
 #include "matomlserv.h"
 #include "cfg.h"
 
@@ -65,6 +66,12 @@ static old_changes_block *old_changes_head=NULL;
 static old_changes_block *old_changes_current=NULL;
 
 static uint16_t ChangelogSecondsToRemember;
+
+static uint8_t ChangelogSaveMode;
+
+#define SAVEMODE_BACKGROUND 0
+#define SAVEMODE_ASYNC 1
+#define SAVEMODE_SYNC 2
 
 static inline void changelog_old_changes_free_block(old_changes_block *oc) {
 	uint32_t i;
@@ -156,35 +163,49 @@ uint64_t changelog_get_minversion(void) {
 }
 
 void changelog_rotate() {
-	char logname1[100],logname2[100];
-	uint32_t i;
-	if (currentfd) {
-		fclose(currentfd);
-		currentfd=NULL;
-	}
-	if (BackLogsNumber>0) {
-		for (i=BackLogsNumber ; i>0 ; i--) {
-			snprintf(logname1,100,"changelog.%"PRIu32".mfs",i);
-			snprintf(logname2,100,"changelog.%"PRIu32".mfs",i-1);
-			rename(logname2,logname1);
-		}
+	if (ChangelogSaveMode==0) {
+		bgsaver_rotatelog();
 	} else {
-		unlink("changelog.0.mfs");
+		char logname1[100],logname2[100];
+		uint32_t i;
+		if (currentfd) {
+			if (ChangelogSaveMode==2) {
+				fsync(fileno(currentfd));
+			}
+			fclose(currentfd);
+			currentfd=NULL;
+		}
+		if (BackLogsNumber>0) {
+			for (i=BackLogsNumber ; i>0 ; i--) {
+				snprintf(logname1,100,"changelog.%"PRIu32".mfs",i);
+				snprintf(logname2,100,"changelog.%"PRIu32".mfs",i-1);
+				rename(logname2,logname1);
+			}
+		} else {
+			unlink("changelog.0.mfs");
+		}
 	}
 	matomlserv_broadcast_logrotate();
 }
 
 void changelog_mr(uint64_t version,const char *data) {
-	if (currentfd==NULL) {
-		currentfd = fopen("changelog.0.mfs","a");
-		if (!currentfd) {
-			syslog(LOG_NOTICE,"lost MFS change %"PRIu64": %s",version,data);
+	if (ChangelogSaveMode==0) {
+		bgsaver_changelog(version,data);
+	} else {
+		if (currentfd==NULL) {
+			currentfd = fopen("changelog.0.mfs","a");
+			if (!currentfd) {
+				syslog(LOG_NOTICE,"lost MFS change %"PRIu64": %s",version,data);
+			}
 		}
-	}
 
-	if (currentfd) {
-		fprintf(currentfd,"%"PRIu64": %s\n",version,data);
-		fflush(currentfd);
+		if (currentfd) {
+			fprintf(currentfd,"%"PRIu64": %s\n",version,data);
+			fflush(currentfd);
+			if (ChangelogSaveMode==2) {
+				fsync(fileno(currentfd));
+			}
+		}
 	}
 }
 
@@ -206,18 +227,39 @@ void changelog(const char *format,...) {
 	}
 
 	changelog_mr(version,printbuff);
-//	if (currentfd==NULL) {
-//		currentfd = fopen("changelog.0.mfs","a");
-//		if (!currentfd) {
-//			syslog(LOG_NOTICE,"lost MFS change %"PRIu64": %s",version,printbuff);
-//		}
-//	}
-//
-//	if (currentfd) {
-//		fprintf(currentfd,"%"PRIu64": %s\n",version,printbuff);
-//		fflush(currentfd);
-//	}
 	changelog_store_logstring(version,(uint8_t*)printbuff,leng);
+}
+
+char* changelog_generate_gids(uint32_t gids,uint32_t *gid) {
+	static char *gidstr = NULL;
+	static uint32_t gidstr_size = 0;
+	uint32_t i,l;
+
+	i = ((gids/32)+1)*32;
+	i *= 11;
+	i += 10;
+	if (i>gidstr_size || gidstr==NULL) {
+		if (gidstr!=NULL) {
+			free(gidstr);
+		}
+		gidstr = malloc(i);
+		passert(gidstr);
+		gidstr_size = i;
+	}
+	l = 0;
+	gidstr[l++] = '[';
+	for (i=0 ; i<gids ; i++) {
+		if (l<gidstr_size) {
+			l += snprintf(gidstr+l,gidstr_size-l,"%"PRIu32,gid[i]);
+		}
+		if (l<gidstr_size) {
+			gidstr[l++] = (i+1<gids)?',':']';
+		}
+	}
+	if (l<gidstr_size) {
+		gidstr[l++]='\0';
+	}
+	return gidstr;
 }
 
 char* changelog_escape_name(uint32_t nleng,const uint8_t *name) {
@@ -260,27 +302,23 @@ char* changelog_escape_name(uint32_t nleng,const uint8_t *name) {
 void changelog_reload(void) {
 	BackLogsNumber = cfg_getuint32("BACK_LOGS",50);
 	if (BackLogsNumber>MAXLOGNUMBER) {
-		syslog(LOG_WARNING,"BACK_LOGS value too big !!!");
-		BackLogsNumber = MAXLOGLINESIZE;
+		mfs_syslog(LOG_WARNING,"BACK_LOGS value too big !!!");
+		BackLogsNumber = MAXLOGNUMBER;
 	}
-	ChangelogSecondsToRemember = cfg_getuint16("CHANGELOG_PRESERVE_SECONDS",600);
+	ChangelogSecondsToRemember = cfg_getuint16("CHANGELOG_PRESERVE_SECONDS",1800);
 	if (ChangelogSecondsToRemember>3600) {
-		syslog(LOG_WARNING,"Number of seconds of change logs to be preserved in master is too big (%"PRIu16") - decreasing to 3600 seconds",ChangelogSecondsToRemember);
+		mfs_arg_syslog(LOG_WARNING,"Number of seconds of change logs to be preserved in master is too big (%"PRIu16") - decreasing to 3600 seconds",ChangelogSecondsToRemember);
 		ChangelogSecondsToRemember=3600;
+	}
+	ChangelogSaveMode = cfg_getuint8("CHANGELOG_SAVE_MODE",0);
+	if (ChangelogSaveMode>2) {
+		mfs_syslog(LOG_WARNING,"CHANGELOG_SAVE_MODE - wrong value - using 0 (write in background)");
+		ChangelogSaveMode = 0;
 	}
 }
 
 int changelog_init(void) {
-	BackLogsNumber = cfg_getuint32("BACK_LOGS",50);
-	if (BackLogsNumber>MAXLOGNUMBER) {
-		fprintf(stderr,"BACK_LOGS value too big !!!");
-		return -1;
-	}
-	ChangelogSecondsToRemember = cfg_getuint16("CHANGELOG_PRESERVE_SECONDS",600);
-	if (ChangelogSecondsToRemember>3600) {
-		syslog(LOG_WARNING,"Number of seconds of change logs to be preserved in master is too big (%"PRIu16") - decreasing to 3600 seconds",ChangelogSecondsToRemember);
-		ChangelogSecondsToRemember=3600;
-	}
+	changelog_reload();
 	main_reload_register(changelog_reload);
 	currentfd = NULL;
 	return 0;

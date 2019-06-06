@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -28,6 +28,7 @@
 
 #include <inttypes.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <syslog.h>
@@ -105,6 +106,19 @@ static const char* opstr[] = {
 /* TDVALID - ok, to be deleted */
 /* TDWVER - wrong version, to be deleted */
 enum {INVALID,DEL,BUSY,VALID,WVER,TDBUSY,TDVALID,TDWVER};
+
+#ifdef MFSDEBUG
+static const char* validstr[] = {
+	"INVALID",
+	"DELETE",
+	"BUSY",
+	"VALID",
+	"WVER",
+	"TDBUSY",
+	"TDVALID",
+	"TDWVER"
+};
+#endif
 
 typedef struct _discserv {
 	uint16_t csid;
@@ -240,12 +254,21 @@ static uint8_t csreceivingchunks = 0;
 #define DANGER_PRIORITIES 7
 #define REPLICATION_DANGER_PRIORITIES 6
 
+#define DPRIORITY_ENDANGERED_HIGHGOAL 0
+#define DPRIORITY_ENDANGERED 1
+#define DPRIORITY_UNDERGOAL_MFR 2
+#define DPRIORITY_MFR 3
+#define DPRIORITY_UNDERGOAL 4
+#define DPRIORITY_WRONGLABEL 5
+#define DPRIORITY_OVERGOAL 6
+
 static chunk** chunks_priority_queue[DANGER_PRIORITIES];
 static uint32_t chunks_priority_leng[DANGER_PRIORITIES];
 static uint32_t chunks_priority_head[DANGER_PRIORITIES];
 static uint32_t chunks_priority_tail[DANGER_PRIORITIES];
 
-// static uint32_t ReplicationsDelayDisconnect=3600;
+static double chunks_priority_mincpsperc[DANGER_PRIORITIES] = {1.0,0.1,0.1,0.01,0.05,0.01,0.3};
+
 static uint32_t ReplicationsDelayInit=60;
 static uint32_t RemoveDelayDisconnect=3600;
 static uint32_t DangerMaxLeng=1000000;
@@ -256,10 +279,15 @@ static uint32_t MaxDelSoftLimit;
 static uint32_t MaxDelHardLimit;
 static double TmpMaxDelFrac;
 static uint32_t TmpMaxDel;
+static uint8_t ReplicationsRespectTopology;
 static uint32_t LoopTimeMin;
 //static uint32_t HashSteps;
 static uint32_t HashCPTMax;
 static double AcceptableDifference;
+
+static uint8_t DoNotUseSameIP;
+static uint8_t DoNotUseSameRack;
+static uint32_t LabelUniqueMask;
 
 static uint32_t jobshpos;
 static uint32_t jobshstep;
@@ -301,35 +329,52 @@ static uint32_t **regularchunkcounts;
 static uint32_t stats_deletions=0;
 static uint32_t stats_replications=0;
 
-/* perfect matching */
-static uint32_t queue[10+MAXCSCOUNT];
-static uint32_t qtop=0;
 
-static inline void queue_push(uint32_t data) {
-	queue[qtop++] = data;
+#ifdef MFSDEBUG
+static void mfsdebug(const char *format,...) {
+	va_list ap;
+	static FILE *fd = NULL;
+
+	if (format==NULL) {
+		if (fd==NULL) {
+			fd = fopen("mfsdebug.txt","a");
+		} else {
+			fflush(fd);
+		}
+	} else if (fd!=NULL) {
+		fprintf(fd,"%"PRIu32" : ",(uint32_t)(main_time()));
+		va_start(ap,format);
+		vfprintf(fd,format,ap);
+		va_end(ap);
+		fputc('\n',fd);
+	}
 }
 
-static inline uint32_t queue_pop(void) {
-	return queue[--qtop];
+void mfsdebug_flush(void) {
+	mfsdebug(NULL);
 }
-
-static inline int queue_notempty(void) {
-	return (qtop>0);
-}
-
-static inline void queue_empty(void) {
-	qtop = 0;
-}
+#endif
 
 int32_t* do_perfect_match(uint32_t labelcnt,uint32_t servcnt,uint32_t **labelmasks,uint16_t *servers) {
-	uint32_t i,l,x,v;
+	uint32_t s,i,l,x,v,vi,sp,rsp,sid,sids,gr;
+	int32_t t;
+	static int32_t *imatching = NULL;
 	static int32_t *matching = NULL;
 	static int32_t *augment = NULL;
 	static uint8_t *visited = NULL;
+	static int32_t *stack = NULL;
+	static int32_t *group = NULL;
+	static int32_t *grnode = NULL;
+	static uint32_t *sidval = NULL;
+	static int32_t *sidpos = NULL;
 	static uint32_t tablength = 0;
+	static uint32_t stablength = 0;
 
-	if (labelcnt + servcnt > tablength || matching==NULL || augment==NULL || visited==NULL) {
+	if (labelcnt + servcnt > tablength || imatching==NULL || matching==NULL || augment==NULL || visited==NULL || stack==NULL) {
 		tablength = 100 + 2 * (labelcnt + servcnt);
+		if (imatching) {
+			free(imatching);
+		}
 		if (matching) {
 			free(matching);
 		}
@@ -339,18 +384,51 @@ int32_t* do_perfect_match(uint32_t labelcnt,uint32_t servcnt,uint32_t **labelmas
 		if (visited) {
 			free(visited);
 		}
+		if (stack) {
+			free(stack);
+		}
+		imatching = malloc(sizeof(int32_t)*tablength);
+		passert(imatching);
 		matching = malloc(sizeof(int32_t)*tablength);
 		passert(matching);
-		memset(matching,0xff,sizeof(int32_t)*tablength);
 		augment = malloc(sizeof(int32_t)*tablength);
 		passert(augment);
-		memset(augment,0xff,sizeof(int32_t)*tablength);
 		visited = malloc(sizeof(uint8_t)*tablength);
 		passert(visited);
-		memset(visited,0,sizeof(uint8_t)*tablength);
+		stack = malloc(sizeof(int32_t)*tablength);
+		passert(stack);
+	}
+	if (servcnt > stablength || sidval==NULL || sidpos==NULL || grnode==NULL || group==NULL) {
+		stablength = 100 + 2 * servcnt;
+		if (sidval) {
+			free(sidval);
+		}
+		if (sidpos) {
+			free(sidpos);
+		}
+		if (grnode) {
+			free(grnode);
+		}
+		if (group) {
+			free(group);
+		}
+		sidval = malloc(sizeof(uint32_t)*stablength);
+		passert(sidval);
+		sidpos = malloc(sizeof(int32_t)*stablength);
+		passert(sidpos);
+		grnode = malloc(sizeof(int32_t)*stablength);
+		passert(grnode);
+		group = malloc(sizeof(int32_t)*stablength);
+		passert(group);
 	}
 
-	for (i=0 ; i<servcnt+labelcnt ; i++) {
+	s = servcnt + labelcnt;
+	if (s==0) {
+		return matching;
+	}
+
+	for (i=0 ; i<s ; i++) {
+		imatching[i] = -1;
 		matching[i] = -1;
 		augment[i] = -1;
 	}
@@ -359,41 +437,90 @@ int32_t* do_perfect_match(uint32_t labelcnt,uint32_t servcnt,uint32_t **labelmas
 		return matching;
 	}
 
+	sp = 0;
+
+	// calc groups
+	sids = 0;
+	for (i=0 ; i<servcnt ; i++) {
+		if (DoNotUseSameIP) {
+			sid = matocsserv_server_get_ip(cstab[servers[i]].ptr);
+		} else if (DoNotUseSameRack) {
+			sid = topology_get_rackid(matocsserv_server_get_ip(cstab[servers[i]].ptr));
+		} else {
+			sid = matocsserv_server_get_labelmask(cstab[servers[i]].ptr) & LabelUniqueMask;
+		}
+		if (sid==0) {
+			group[i] = i;
+		} else {
+			for (l=0 ; l<sids && sid!=sidval[l] ; l++) { }
+			if (l==sids) {
+				sidval[l] = sid;
+				sidpos[l] = i;
+				sids++;
+			}
+			group[i] = sidpos[l];
+		}
+	}
+
 	for (l=0 ; l<labelcnt ; l++) {
-		if (matching[l]==-1) {
+		if (imatching[l]==-1) {
 			for (i=0 ; i<servcnt+labelcnt ; i++) {
 				visited[i] = 0;
 			}
 			visited[l] = 1;
 			augment[l] = -1;
-			queue_push(l);
-			while (queue_notempty()) {
-				x = queue_pop();
+			stack[sp++] = l; // push
+			while (sp!=0) { // stack not empty
+				x = stack[--sp]; // pop
 				if (x<labelcnt) {
+					rsp = sp;
 					for (v=0 ; v<servcnt ; v++) {
-						if (matocsserv_server_has_labels(cstab[servers[v]].ptr,labelmasks[x])) {
-							if (visited[labelcnt+v]==0) {
-								visited[labelcnt+v]=1;
-								augment[labelcnt+v]=x;
-								queue_push(labelcnt+v);
+#ifdef MATCH_LEFT
+						vi = v;
+#else
+						vi = servcnt-1-v;
+#endif
+						gr = group[vi];
+						if (visited[labelcnt+gr]==0) {
+							if (matocsserv_server_has_labels(cstab[servers[vi]].ptr,labelmasks[x])) {
+								visited[labelcnt+gr] = 1;
+								augment[labelcnt+gr] = x;
+								grnode[gr] = vi;
+								stack[sp++] = labelcnt + gr; // push
 							}
 						}
 					}
-				} else if (matching[x] >= 0) {
-					augment[matching[x]] = x;
-					visited[matching[x]] = 1;
-					queue_push(matching[x]);
+					// reverse stack from rsp to sp
+					for (v=0 ; v<(sp-rsp)/2 ; v++) {
+						// swap stack[rsp+v] , stack[sp-1-v]
+						t = stack[sp-1-v];
+						stack[sp-1-v] = stack[rsp+v];
+						stack[rsp+v] = t;
+					}
+				} else if (imatching[x] >= 0) {
+					augment[imatching[x]] = x;
+					visited[imatching[x]] = 1;
+					stack[sp++] = imatching[x];
 				} else {
 					while (augment[x]>=0) {
 						if (x>=labelcnt) {
-							matching[x] = augment[x];
-							matching[augment[x]] = x;
+							imatching[x] = augment[x];
+							imatching[augment[x]] = x;
+							matching[augment[x]] = grnode[x-labelcnt] + labelcnt;
 						}
 						x = augment[x];
 					}
-					queue_empty();
+					sp = 0; // clear stack;
 				}
 			}
+		}
+	}
+
+	// add reverse matching
+	for (i=0 ; i<labelcnt ; i++) {
+		t = matching[i];
+		if (t>=0) {
+			matching[t] = i;
 		}
 	}
 	return matching;
@@ -406,9 +533,9 @@ void chunk_stats(uint32_t *del,uint32_t *repl) {
 	stats_replications = 0;
 }
 
-CREATE_BUCKET_ALLOCATOR(slist,slist,5000)
+CREATE_BUCKET_ALLOCATOR(slist,slist,10000000/sizeof(slist))
 
-CREATE_BUCKET_ALLOCATOR(chunk,chunk,20000)
+CREATE_BUCKET_ALLOCATOR(chunk,chunk,10000000/sizeof(chunk))
 
 void chunk_get_memusage(uint64_t allocated[3],uint64_t used[3]) {
 	allocated[0] = sizeof(chunk*)*chunkrehashpos;
@@ -807,6 +934,9 @@ static inline void chunk_priority_queue_check(chunk *c,uint8_t checklabels) {
 	uint32_t labelcnt;
 	int32_t *matching;
 	uint8_t wronglabels;
+#ifdef MFSDEBUG
+	uint8_t debug;
+#endif
 
 	if (c==NULL) {
 		if (servers==NULL && checklabels==0) {
@@ -819,7 +949,15 @@ static inline void chunk_priority_queue_check(chunk *c,uint8_t checklabels) {
 		return;
 	}
 
+#ifdef MFSDEBUG
+	debug = ((c->chunkid&0xFFF)==0)?1:0;
+#endif
 	if (c->ondangerlist || servers==NULL || c->sclassid==0 || c->fcount==0 || c->lockedto+3600>=(uint32_t)main_time()) {
+#ifdef MFSDEBUG
+		if (debug) {
+			mfsdebug("chunk_priority_queue_check ; chunkid=%016"PRIX64" ; ignore: ondangerlist=%u ; servers%c=NULL ; sclassid=%u ; fcount=%u ; lockedto=%"PRIu32,c->chunkid,c->ondangerlist,(servers==NULL)?'=':'!',c->sclassid,c->fcount,c->lockedto);
+		}
+#endif
 		return;
 	}
 	vc = 0;
@@ -836,7 +974,7 @@ static inline void chunk_priority_queue_check(chunk *c,uint8_t checklabels) {
 	}
 	wronglabels = 0;
 	goal = sclass_get_keeparch_goal(c->sclassid,c->archflag);
-	if (sclass_has_keeparch_labels(c->sclassid,c->archflag) && vc >= goal && checklabels) {
+	if (((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag)) && vc >= goal && checklabels) {
 		servcnt = 0;
 		for (s=c->slisthead ; s ; s=s->next) {
 			if (s->valid==VALID) {
@@ -854,21 +992,30 @@ static inline void chunk_priority_queue_check(chunk *c,uint8_t checklabels) {
 	}
 	if (vc+tdc > 0 && (vc != goal || wronglabels)) { // wrong-goal chunk
 		if (vc+tdc==1 && goal>2) { // highest priority - chunks with one copy and high goal
-			j = 0;
+			j = DPRIORITY_ENDANGERED_HIGHGOAL;
 		} else if (vc+tdc==1 && goal==2) { // next priority - chunks with one copy
-			j = 1;
+			j = DPRIORITY_ENDANGERED;
 		} else if (vc==1 && tdc>0) { // next priority - chunks on one regular disk and some "marked for removal" disks
-			j = 2;
+			j = DPRIORITY_UNDERGOAL_MFR;
 		} else if (tdc>0) { // next priority - chunks on "marked for removal" disks
-			j = 3;
+			j = DPRIORITY_MFR;
 		} else if (vc < goal) { // next priority - standard undergoal chunks
-			j = 4;
+			j = DPRIORITY_UNDERGOAL;
 		} else if (wronglabels) { // next priority - changed labels
-			j = 5;
+			j = DPRIORITY_WRONGLABEL;
 		} else { // lowest priority - overgoal
-			j = 6;
+			j = DPRIORITY_OVERGOAL;
 		}
+#ifdef MFSDEBUG
+		if (debug) {
+			mfsdebug("chunk_priority_queue_check ; chunkid=%016"PRIX64" ; enqueue: priority=%u ; vc=%u ; tdc=%u ; goal=%u ; wronglabels=%u",c->chunkid,j,vc,tdc,goal,wronglabels);
+		}
+#endif
 		chunk_priority_enqueue(j,c);
+#ifdef MFSDEBUG
+	} else if (debug) {
+		mfsdebug("chunk_priority_queue_check ; chunkid=%016"PRIX64" ; exit: vc=%u ; tdc=%u ; goal=%u ; wronglabels=%u",c->chunkid,vc,tdc,goal,wronglabels);
+#endif
 	}
 }
 
@@ -1437,7 +1584,7 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 		csstable = 0;
 	}
 
-	if (chunk_counters_in_progress() && csdb_have_all_servers()) {
+	if (chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		csalldata = 1;
 	} else {
 		csalldata = 0;
@@ -1447,15 +1594,15 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 		if (mr==0) {
 			servcount = chunk_creation_servers(csids,sclassid,&overloaded);
 			if (servcount==0) {
-				if (overloaded) {
-					return MFS_ERROR_EAGAIN;
+				if (overloaded || csalldata==0) {
+					return MFS_ERROR_EAGAIN; // try again for ever
 				} else {
 					uint16_t scount;
 					scount = matocsserv_servers_count();
 					if (scount>0 && csstable) {
-						return MFS_ERROR_NOSPACE;
+						return MFS_ERROR_NOSPACE; // return error
 					} else {
-						return MFS_ERROR_NOCHUNKSERVERS;
+						return MFS_ERROR_NOCHUNKSERVERS; // try again
 					}
 				}
 			}
@@ -1553,9 +1700,9 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 						*opflag = 1;
 					} else {
 						if (csalldata) {
-							return MFS_ERROR_CHUNKLOST;
+							return MFS_ERROR_CHUNKLOST; // return error
 						} else {
-							return MFS_ERROR_CSNOTPRESENT;
+							return MFS_ERROR_CSNOTPRESENT; // try again
 						}
 					}
 				} else {
@@ -1625,9 +1772,9 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 					*opflag=1;
 				} else {
 					if (csalldata) {
-						return MFS_ERROR_CHUNKLOST;
+						return MFS_ERROR_CHUNKLOST; // return error
 					} else {
-						return MFS_ERROR_CSNOTPRESENT;
+						return MFS_ERROR_CSNOTPRESENT; // try again
 					}
 				}
 			} else {
@@ -1669,7 +1816,7 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 		csstable = 0;
 	}
 
-	if (chunk_counters_in_progress() && csdb_have_all_servers()) {
+	if (chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		csalldata = 1;
 	} else {
 		csalldata = 0;
@@ -1727,9 +1874,9 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 				c->version++;
 			} else {
 				if (csalldata) {
-					return MFS_ERROR_CHUNKLOST;
+					return MFS_ERROR_CHUNKLOST; // return error
 				} else {
-					return MFS_ERROR_CSNOTPRESENT;
+					return MFS_ERROR_CSNOTPRESENT; // try again
 				}
 			}
 		} else {
@@ -1793,9 +1940,9 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 				*nchunkid = c->chunkid;
 			} else {
 				if (csalldata) {
-					return MFS_ERROR_CHUNKLOST;
+					return MFS_ERROR_CHUNKLOST; // return error
 				} else {
-					return MFS_ERROR_CSNOTPRESENT;
+					return MFS_ERROR_CSNOTPRESENT; // try again
 				}
 			}
 		} else {
@@ -2069,7 +2216,7 @@ int chunk_mr_chunkadd(uint32_t ts,uint64_t chunkid,uint32_t version,uint32_t loc
 	if (chunkid>=nextchunkid) {
 		nextchunkid=chunkid+1;
 	}
-	if (lockedto<ts) {
+	if (lockedto>0 && lockedto<ts) {
 		return MFS_ERROR_MISMATCH;
 	}
 	c = chunk_new(chunkid);
@@ -2131,7 +2278,10 @@ void chunk_server_has_chunk(uint16_t csid,uint64_t chunkid,uint32_t version) {
 	static uint32_t loglastts = 0;
 	static uint32_t ilogcount = 0;
 	static uint32_t clogcount = 0;
+#else
+	uint8_t debug;
 #endif
+
 	cstab[csid].newchunkdelay = NEWCHUNKDELAY;
 	csreceivingchunks |= 2;
 
@@ -2182,8 +2332,61 @@ void chunk_server_has_chunk(uint16_t csid,uint64_t chunkid,uint32_t version) {
 		c->lockedto = (uint32_t)main_time()+UNUSED_DELETE_TIMEOUT;
 		changelog("%"PRIu32"|CHUNKADD(%"PRIu64",%"PRIu32",%"PRIu32")",main_time(),c->chunkid,c->version,c->lockedto);
 	}
+#ifdef MFSDEBUG
+	debug = ((chunkid&0xFFF)==0)?1:0;
+	if (debug) {
+		mfsdebug("chunk_server_has_chunk ; chunkid=%016"PRIX64" new copy: mfrstatus=%u ; csid=%"PRIu16" ; ip=%s",chunkid,(version&0x80000000)?1:0,csid,matocsserv_getstrip(cstab[csid].ptr));
+		for (s=c->slisthead ; s ; s=s->next) {
+			mfsdebug("chunk_server_has_chunk ; chunkid=%016"PRIX64" ; existing copy: mfrstatus=%u ; valid=%s ; csid=%"PRIu16" ; ip=%s",chunkid,(s->valid==TDVALID || s->valid==TDBUSY || s->valid==TDWVER)?1:0,validstr[s->valid],s->csid,matocsserv_getstrip(cstab[s->csid].ptr));
+		}
+	}
+#endif
 	for (s=c->slisthead ; s ; s=s->next) {
 		if (s->csid==csid) {
+			uint8_t nextallvalidcopies = c->allvalidcopies;
+			uint8_t nextregularvalidcopies = c->regularvalidcopies;
+			uint8_t nextvalid;
+			if (s->valid==INVALID || s->valid==DEL || s->valid==WVER || s->valid==TDWVER) { // ignore such copy
+				return;
+			}
+			// in case of other copies just check 'mark for removal' status
+			if (s->valid==BUSY || s->valid==TDBUSY) {
+				if (version&0x80000000) {
+					nextvalid = TDBUSY;
+				} else {
+					nextvalid = BUSY;
+				}
+			} else {
+				if (version&0x80000000) {
+					nextvalid = TDVALID;
+				} else {
+					nextvalid = VALID;
+				}
+			}
+			if (s->valid==nextvalid) {
+				return;
+			}
+			if (s->valid==VALID || s->valid==BUSY) {
+				nextallvalidcopies--;
+				nextregularvalidcopies--;
+			} else if (s->valid==TDVALID || s->valid==TDBUSY) {
+				nextallvalidcopies--;
+			}
+			if (nextvalid==VALID || nextvalid==BUSY) {
+				nextallvalidcopies++;
+				nextregularvalidcopies++;
+			} else if (nextvalid==TDVALID || nextvalid==TDBUSY) {
+				nextallvalidcopies++;
+			}
+			s->valid = nextvalid;
+			if (nextallvalidcopies!=c->allvalidcopies || nextregularvalidcopies!=c->regularvalidcopies) {
+				chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,nextallvalidcopies,c->regularvalidcopies,nextregularvalidcopies);
+				c->allvalidcopies = nextallvalidcopies;
+				c->regularvalidcopies = nextregularvalidcopies;
+				if (version&0x80000000) {
+					chunk_mfr_state_check(c);
+				}
+			}
 			return;
 		}
 	}
@@ -2392,6 +2595,9 @@ void chunk_server_register_end(uint16_t csid) {
 		cstab[csid].registered = 1;
 		csregisterinprogress -= 1;
 	}
+	if (csregisterinprogress==0) {
+		matoclserv_fuse_invalidate_chunk_cache();
+	}
 }
 
 void chunk_server_disconnected(uint16_t csid) {
@@ -2424,6 +2630,7 @@ void chunk_server_disconnected(uint16_t csid) {
 	for (csid = csusedhead ; csid < MAXCSCOUNT ; csid = cstab[csid].next) {
 		cstab[csid].mfr_state = UNKNOWN_HARD;
 	}
+	matoclserv_fuse_invalidate_chunk_cache();
 }
 
 void chunk_server_disconnection_loop(void) {
@@ -2506,40 +2713,65 @@ void chunk_got_delete_status(uint16_t csid,uint64_t chunkid,uint8_t status) {
 
 void chunk_got_replicate_status(uint16_t csid,uint64_t chunkid,uint32_t version,uint8_t status) {
 	chunk *c;
-	slist *s;
+	slist *s,**st;
+	uint8_t fix;
+
 	c = chunk_find(chunkid);
 	if (c==NULL) {
 		return ;
 	}
 	if (c->operation==REPLICATE) { // high priority replication
-		for (s=c->slisthead ; s ; s=s->next) {
-			if (s->csid == csid) {
-				if (s->valid!=BUSY) {
-					syslog(LOG_WARNING,"got replication status from server not set as busy !!!");
-				}
-				if (status!=0 || version!=c->version) {
-					if (s->valid==TDBUSY || s->valid==TDVALID) {
-						chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies-1,c->regularvalidcopies,c->regularvalidcopies);
-						c->allvalidcopies--;
-					}
-					if (s->valid==BUSY || s->valid==VALID) {
-						chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies-1,c->regularvalidcopies,c->regularvalidcopies-1);
-						c->allvalidcopies--;
-						c->regularvalidcopies--;
-					}
-					if (c->writeinprogress && s->valid!=INVALID && s->valid!=DEL && s->valid!=WVER && s->valid!=TDWVER) {
+		fix = 0;
+		if (status!=0) { // chunk hasn't been replicated (error occured) - simply remove it from copies
+			st = &(c->slisthead);
+			while (*st) {
+				s = *st;
+				if (s->csid==csid && s->valid==BUSY) {
+					chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies-1,c->regularvalidcopies,c->regularvalidcopies-1);
+					c->allvalidcopies--;
+					c->regularvalidcopies--;
+					if (c->writeinprogress) {
 						matocsserv_write_counters(cstab[s->csid].ptr,0);
 					}
-					s->valid = INVALID;
-					s->version = 0;	// after unfinished operation can't be shure what version chunk has
+					fix = 1;
+					*st = s->next;
+					chunk_delopchunk(s->csid,c->chunkid);
+					slist_free(s);
 				} else {
-					if (s->valid == BUSY || s->valid == VALID) {
-						s->valid = VALID;
-					}
+					st = &(s->next);
 				}
-				chunk_delopchunk(s->csid,c->chunkid);
-			} else if (s->valid==BUSY) {
-				syslog(LOG_WARNING,"got replication status from one server, but another is set as busy !!!");
+			}
+		}
+		if (fix==0) {
+			for (s=c->slisthead ; s ; s=s->next) {
+				if (s->csid == csid) {
+					if (s->valid!=BUSY) {
+						syslog(LOG_WARNING,"got replication status from server not set as busy !!!");
+					}
+					if (status!=0 || version!=c->version) {
+						if (s->valid==TDBUSY || s->valid==TDVALID) {
+							chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies-1,c->regularvalidcopies,c->regularvalidcopies);
+							c->allvalidcopies--;
+						}
+						if (s->valid==BUSY || s->valid==VALID) {
+							chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies-1,c->regularvalidcopies,c->regularvalidcopies-1);
+							c->allvalidcopies--;
+							c->regularvalidcopies--;
+						}
+						if (c->writeinprogress && s->valid!=INVALID && s->valid!=DEL && s->valid!=WVER && s->valid!=TDWVER) {
+							matocsserv_write_counters(cstab[s->csid].ptr,0);
+						}
+						s->valid = INVALID;
+						s->version = 0;	// after unfinished operation can't be shure what version chunk has
+					} else {
+						if (s->valid == BUSY || s->valid == VALID) {
+							s->valid = VALID;
+						}
+					}
+					chunk_delopchunk(s->csid,c->chunkid);
+				} else if (s->valid==BUSY) {
+					syslog(LOG_WARNING,"got replication status from one server, but another is set as busy !!!");
+				}
 			}
 		}
 		c->operation = NONE;
@@ -2738,7 +2970,169 @@ void chunk_store_info(uint8_t *buff) {
 	put32bit(&buff,chunksinfo.locked_used);
 }
 
-//jobs state: jobshpos
+static inline uint8_t chunk_mindist(uint16_t csid,uint32_t ip[255],uint8_t ipcnt) {
+	uint8_t mindist,dist,k;
+	uint32_t sip;
+	mindist = TOPOLOGY_DIST_MAX;
+	if (matocsserv_get_csdata(cstab[csid].ptr,&sip,NULL,NULL,NULL)==0) {
+		for (k=0 ; k<ipcnt && mindist>0 ; k++) {
+			dist=topology_distance(sip,ip[k]);
+			if (dist<mindist) {
+				mindist = dist;
+			}
+		}
+	}
+	return mindist;
+}
+
+// first servers in the same rack (server id), then other (yes, same rack is better than same physical server, so order is 1 and then 0 or 2)
+static inline void chunk_rack_sort(uint16_t servers[MAXCSCOUNT],uint16_t servcount,uint32_t ip[255],uint8_t ipcnt) {
+	uint16_t i,j;
+	uint16_t csid;
+	uint8_t mindist;
+
+	if (servcount==0 || ipcnt==0) {
+		return;
+	}
+	i = 0;
+	j = servcount-1;
+	while (i<j) {
+		while (i<j) {
+			mindist = chunk_mindist(servers[i],ip,ipcnt);
+			if (mindist!=TOPOLOGY_DIST_SAME_RACKID) {
+				break;
+			}
+			i++;
+		}
+		while (i<j) {
+			mindist = chunk_mindist(servers[j],ip,ipcnt);
+			if (mindist==TOPOLOGY_DIST_SAME_RACKID) {
+				break;
+			}
+			j--;
+		}
+		if (i<j) {
+			csid = servers[i];
+			servers[i] = servers[j];
+			servers[j] = csid;
+		}
+	}
+}
+
+static inline uint16_t chunk_get_undergoal_replicate_srccsid(chunk *c,uint16_t dstcsid,uint32_t now,uint32_t lclass,uint32_t rgvc,uint32_t rgtdc) {
+	slist *s;
+	uint32_t r = 0;
+	uint16_t srccsid = MAXCSCOUNT;
+
+	if (ReplicationsRespectTopology) {
+		uint32_t min_dist = 0xFFFFFFFF;
+		uint32_t dist;
+		uint32_t ip;
+		uint32_t cuip;
+		uint32_t mdrgvc = 0;
+		uint32_t mdrgtdc = 0;
+
+		if (matocsserv_get_csdata(cstab[dstcsid].ptr,&cuip,NULL,NULL,NULL)==0) {
+			for (s=c->slisthead ; s ; s=s->next) {
+				if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && (s->valid==VALID || s->valid==TDVALID)) {
+					if (matocsserv_get_csdata(cstab[s->csid].ptr,&ip,NULL,NULL,NULL)==0) {
+						dist=topology_distance(ip,cuip);
+						if (min_dist>=dist) {
+							if (min_dist>dist) {
+								min_dist=dist;
+								srccsid=s->csid;
+								mdrgvc = 0;
+								mdrgtdc = 0;
+							} else if (s->valid==VALID) {
+								srccsid=s->csid;
+							}
+							if (s->valid==VALID) {
+								mdrgvc++;
+							} else {
+								mdrgtdc++;
+							}
+						}
+					}
+				}
+			}
+			if (mdrgvc > 1) {
+				r = 1+rndu32_ranged(mdrgvc);
+			} else if (mdrgvc == 0 && mdrgtdc > 1) {  // we have to choose TDVALID chunks
+				r = 1+rndu32_ranged(mdrgtdc);
+			}
+			for (s=c->slisthead ; s && r>0 ; s=s->next) {
+				if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && (s->valid==VALID || s->valid==TDVALID)) {
+					if (matocsserv_get_csdata(cstab[s->csid].ptr,&ip,NULL,NULL,NULL)==0) {
+						dist=topology_distance(ip,cuip);
+						if (min_dist==dist) {
+							if (mdrgvc > 1 && s->valid==VALID) {
+								r--;
+								srccsid=s->csid;
+							} else if (mdrgtdc > 1 && s->valid==TDVALID) {
+								r--;
+								srccsid=s->csid;
+							}
+						}
+					}
+				}
+			}
+		}
+	} else {
+		if (rgvc>0) {	// if there are VALID copies then make copy of one VALID chunk
+			r = 1+rndu32_ranged(rgvc);
+			for (s=c->slisthead ; s && r>0 ; s=s->next) {
+				if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==VALID) {
+					r--;
+					srccsid = s->csid;
+				}
+			}
+		} else {	// if not then use TDVALID chunks.
+			r = 1+rndu32_ranged(rgtdc);
+			for (s=c->slisthead ; s && r>0 ; s=s->next) {
+				if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==TDVALID) {
+					r--;
+					srccsid = s->csid;
+				}
+			}
+		}
+	}
+
+	return srccsid;
+}
+
+static inline int chunk_undergoal_replicate(chunk *c,uint16_t dstcsid,uint32_t now,uint32_t lclass,uint16_t priority,loop_info *inforec,uint32_t rgvc,uint32_t rgtdc) {
+	slist *s;
+	uint16_t srccsid;
+
+	srccsid = chunk_get_undergoal_replicate_srccsid(c,dstcsid,now,lclass,rgvc,rgtdc);
+	if (srccsid==MAXCSCOUNT) {
+		return -1;
+	}
+	stats_replications++;
+	// high priority replication
+	if (matocsserv_send_replicatechunk(cstab[dstcsid].ptr,c->chunkid,c->version,cstab[srccsid].ptr)<0) {
+		syslog(LOG_WARNING,"chunk %016"PRIX64"_%08"PRIX32": error sending replicate command",c->chunkid,c->version);
+		return 1;
+	}
+	chunk_addopchunk(dstcsid,c->chunkid);
+	c->operation = REPLICATE;
+	c->lockedto = now+LOCKTIMEOUT;
+	s = slist_malloc();
+	s->csid = dstcsid;
+	s->valid = BUSY;
+	s->version = c->version;
+	s->next = c->slisthead;
+	c->slisthead = s;
+	chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies+1);
+	c->allvalidcopies++;
+	c->regularvalidcopies++;
+	if (priority<5) {
+		inforec->done.copy_undergoal++;
+	} else {
+		inforec->done.copy_wronglabels++;
+	}
+	return 0;
+}
 
 void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,uint8_t extrajob) {
 	slist *s;
@@ -2763,6 +3157,11 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 	uint32_t servcnt,extraservcnt;
 	int32_t *matching;
 	uint32_t forcereplication;
+	uint32_t vrip[255];
+	uint8_t vripcnt;
+#ifdef MFSDEBUG
+	uint8_t debug;
+#endif
 
 	if (servers==NULL) {
 		servers = malloc(sizeof(uint16_t)*MAXCSCOUNT);
@@ -2883,6 +3282,15 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 			break;
 		}
 	}
+#ifdef MFSDEBUG
+	debug = ((c->chunkid&0xFFF)==0)?1:0;
+	if (debug) {
+		mfsdebug("chunk_do_jobs ; chunkid=%016"PRIX64" ; vc=%u ; tdc=%u ; bc=%u ; tdb=%u ; wvc=%u ; tdw=%u ; ivc=%u ; dc=%u",c->chunkid,vc,tdc,bc,tdb,wvc,tdw,ivc,dc);
+		for (s=c->slisthead ; s ; s=s->next) {
+			mfsdebug("chunk_do_jobs ; chunkid=%016"PRIX64" ; existing copy: valid=%s ; csid=%"PRIu16" ; ip=%s",c->chunkid,validstr[s->valid],s->csid,matocsserv_getstrip(cstab[s->csid].ptr));
+		}
+	}
+#endif
 	if (c->allvalidcopies!=vc+tdc+bc+tdb) {
 		syslog(LOG_WARNING,"chunk %016"PRIX64"_%08"PRIX32": wrong all valid copies counter - (counter value: %u, should be: %u) - fixed",c->chunkid,c->version,c->allvalidcopies,vc+tdc+bc+tdb);
 		chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,vc+tdc+bc+tdb,c->regularvalidcopies,c->regularvalidcopies);
@@ -3166,7 +3574,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 		delnotdone+=(vc-goal);
 		prevdone = 1;
 
-		if (sclass_has_keeparch_labels(c->sclassid,c->archflag)) { // labels version
+		if ((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag)) { // labels version
 			servcnt = 0;
 			for (i=0 ; i<dservcount ; i++) {
 				for (s=c->slisthead ; s && s->csid!=dcsids[dservcount-1-i] ; s=s->next) {}
@@ -3196,7 +3604,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 							dc++;
 						} else {
 							prevdone=0;
-							chunk_priority_enqueue(6,c); // in such case only enqueue this chunk for future processing
+							chunk_priority_enqueue(DPRIORITY_OVERGOAL,c); // in such case only enqueue this chunk for future processing
 						}
 					}
 				}
@@ -3221,7 +3629,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 						dc++;
 					} else {
 						prevdone=0;
-						chunk_priority_enqueue(6,c); // in such case only enqueue this chunk for future processing
+						chunk_priority_enqueue(DPRIORITY_OVERGOAL,c); // in such case only enqueue this chunk for future processing
 					}
 				}
 			}
@@ -3230,7 +3638,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 	}
 
 // step 7.2. if chunk has one copy on each server and some of them have status TDVALID then delete them
-	if (extrajob==0 && vc+tdc>=scount && vc<goal && tdc>0 && vc+tdc>1 && chunks_priority_leng[0]==0 && chunks_priority_leng[1]==0 && chunks_priority_leng[2]==0) {
+	if (extrajob==0 && vc+tdc>=scount && vc<goal && tdc>0 && vc+tdc>1 && chunks_priority_leng[DPRIORITY_ENDANGERED_HIGHGOAL]==0 && chunks_priority_leng[DPRIORITY_ENDANGERED]==0 && chunks_priority_leng[DPRIORITY_UNDERGOAL_MFR]==0) {
 		uint8_t tdcr = 0;
 		for (s=c->slisthead ; s ; s=s->next) {
 			if (s->valid==TDVALID) {
@@ -3269,7 +3677,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 
 // step 8. check matching for labeled chunks
 	forcereplication = 0;
-	if (sclass_has_keeparch_labels(c->sclassid,c->archflag)) {
+	if ((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag)) {
 		servcnt = 0;
 		for (s=c->slisthead ; s ; s=s->next) {
 			if (s->valid==VALID) {
@@ -3296,22 +3704,22 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 			uint8_t allservflag;
 
 			if (vc+tdc==1 && goal>2) { // highest priority - chunks with only one copy and high goal
-				j = 0;
+				j = DPRIORITY_ENDANGERED_HIGHGOAL;
 				lclass = 0;
 			} else if (vc+tdc==1 && goal==2) { // next priority - chunks with only one copy
-				j = 1;
+				j = DPRIORITY_ENDANGERED;
 				lclass = 0;
 			} else if (vc==1 && tdc>0) { // next priority - chunks on one regular disk and some "marked for removal" disks
-				j = 2;
+				j = DPRIORITY_UNDERGOAL_MFR;
 				lclass = 1;
 			} else if (tdc>0) { // next priority - chunks on "marked for removal" disks
-				j = 3;
+				j = DPRIORITY_MFR;
 				lclass = 1;
 			} else if (vc < goal) { // next priority - standard undergoal chunks
-				j = 4;
+				j = DPRIORITY_UNDERGOAL;
 				lclass = 1;
 			} else { // lowest priority - wrong labeled chunks
-				j = 5;
+				j = DPRIORITY_WRONGLABEL;
 				lclass = 1;
 			}
 			if (extrajob==0) {
@@ -3330,24 +3738,39 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 			rservcount = matocsserv_getservers_lessrepl(rcsids,MaxWriteRepl[lclass],(j<2)?1:0,&allservflag);
 			rgvc=0;
 			rgtdc=0;
+			vripcnt=0;
 			for (s=c->slisthead ; s ; s=s->next) {
 				if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass]) {
 					if (s->valid==VALID) {
 						rgvc++;
+						if (vripcnt<255 && ReplicationsRespectTopology>1) {
+							if (matocsserv_get_csdata(cstab[s->csid].ptr,vrip+vripcnt,NULL,NULL,NULL)==0) {
+								vripcnt++;
+							}
+						}
 					} else if (s->valid==TDVALID) {
 						rgtdc++;
+						if (vripcnt<255 && ReplicationsRespectTopology>1) {
+							if (matocsserv_get_csdata(cstab[s->csid].ptr,vrip+vripcnt,NULL,NULL,NULL)==0) {
+								vripcnt++;
+							}
+						}
 					}
 				}
 			}
+			if (ReplicationsRespectTopology>1) {
+				chunk_rack_sort(rcsids,rservcount,vrip,vripcnt);
+			}
 			if (rgvc+rgtdc>0 && rservcount>0) { // have at least one server to read from and at least one to write to
-				if (sclass_has_keeparch_labels(c->sclassid,c->archflag)) { // labels version
+				if ((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag)) { // labels version
 					uint32_t dstservcnt;
 					uint8_t allowallservers;
+					// reverse order - do_perfect_match matches servers 'from right' - this is important when ReplicationsRespectTopology>1
 					servcnt = 0;
 					for (i=0 ; i<rservcount ; i++) {
-						for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
+						for (s=c->slisthead ; s && s->csid!=rcsids[rservcount-1-i] ; s=s->next) {}
 						if (s==NULL) {
-							servers[servcnt++] = rcsids[i];
+							servers[servcnt++] = rcsids[rservcount-1-i];
 						}
 					}
 					dstservcnt = servcnt;
@@ -3390,52 +3813,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 */
 					for (i=0 ; i<dstservcnt && canbefixed ; i++) {
 						if (matching[i+labelcnt]>=0 || allowallservers) {
-							uint32_t r;
-							if (rgvc>0) {	// if there are VALID copies then make copy of one VALID chunk
-								r = 1+rndu32_ranged(rgvc);
-								srccsid = MAXCSCOUNT;
-								for (s=c->slisthead ; s && r>0 ; s=s->next) {
-									if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==VALID) {
-										r--;
-										srccsid = s->csid;
-									}
-								}
-							} else {	// if not then use TDVALID chunks.
-								r = 1+rndu32_ranged(rgtdc);
-								srccsid = MAXCSCOUNT;
-								for (s=c->slisthead ; s && r>0 ; s=s->next) {
-									if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==TDVALID) {
-										r--;
-										srccsid = s->csid;
-									}
-								}
-							}
-							if (srccsid!=MAXCSCOUNT) {
-								stats_replications++;
-								// high priority replication
-								if (matocsserv_send_replicatechunk(cstab[servers[i]].ptr,c->chunkid,c->version,cstab[srccsid].ptr)<0) {
-									syslog(LOG_WARNING,"chunk %016"PRIX64"_%08"PRIX32": error sending replicate command",c->chunkid,c->version);
-									return;
-								}
-								chunk_addopchunk(servers[i],c->chunkid);
-								c->operation = REPLICATE;
-								c->lockedto = now+LOCKTIMEOUT;
-								s = slist_malloc();
-								s->csid = servers[i];
-								s->valid = BUSY;
-								s->version = c->version;
-								s->next = c->slisthead;
-								c->slisthead = s;
-								chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies+1);
-								c->allvalidcopies++;
-								c->regularvalidcopies++;
-								if (extrajob==0) {
-									if (j<5) {
-										inforec.done.copy_undergoal++;
-									} else {
-										inforec.done.copy_wronglabels++;
-									}
-								}
+							if (chunk_undergoal_replicate(c, servers[i], now, lclass, j, &inforec, rgvc, rgtdc)>=0) {
 								return;
 							}
 						}
@@ -3447,52 +3825,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 					for (i=0 ; i<rservcount ; i++) {
 						for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
 						if (!s) {
-							uint32_t r;
-							if (rgvc>0) {	// if there are VALID copies then make copy of one VALID chunk
-								r = 1+rndu32_ranged(rgvc);
-								srccsid = MAXCSCOUNT;
-								for (s=c->slisthead ; s && r>0 ; s=s->next) {
-									if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==VALID) {
-										r--;
-										srccsid = s->csid;
-									}
-								}
-							} else {	// if not then use TDVALID chunks.
-								r = 1+rndu32_ranged(rgtdc);
-								srccsid = MAXCSCOUNT;
-								for (s=c->slisthead ; s && r>0 ; s=s->next) {
-									if (matocsserv_replication_read_counter(cstab[s->csid].ptr,now)<MaxReadRepl[lclass] && s->valid==TDVALID) {
-										r--;
-										srccsid = s->csid;
-									}
-								}
-							}
-							if (srccsid!=MAXCSCOUNT) {
-								stats_replications++;
-								// high priority replication
-								if (matocsserv_send_replicatechunk(cstab[rcsids[i]].ptr,c->chunkid,c->version,cstab[srccsid].ptr)<0) {
-									syslog(LOG_WARNING,"chunk %016"PRIX64"_%08"PRIX32": error sending replicate command",c->chunkid,c->version);
-									return;
-								}
-								chunk_addopchunk(rcsids[i],c->chunkid);
-								c->operation = REPLICATE;
-								c->lockedto = now+LOCKTIMEOUT;
-								s = slist_malloc();
-								s->csid = rcsids[i];
-								s->valid = BUSY;
-								s->version = c->version;
-								s->next = c->slisthead;
-								c->slisthead = s;
-								chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies+1);
-								c->allvalidcopies++;
-								c->regularvalidcopies++;
-								if (extrajob==0) {
-									if (j<5) { // pro forma = should be always true
-										inforec.done.copy_undergoal++;
-									} else {
-										inforec.done.copy_wronglabels++;
-									}
-								}
+							if (chunk_undergoal_replicate(c, rcsids[i], now, lclass, j, &inforec, rgvc, rgtdc)>=0) {
 								return;
 							}
 						}
@@ -3503,15 +3836,13 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 				chunk_priority_enqueue(j,c);
 			}
 		}
-		if (extrajob==0) {
-			if (vc < goal) {
-				inforec.notdone.copy_undergoal++;
+		if (vc < goal) {
+			inforec.notdone.copy_undergoal++;
+		} else {
+			if (canbefixed==0) {
+				inforec.labels_dont_match++;
 			} else {
-				if (canbefixed==0) {
-					inforec.labels_dont_match++;
-				} else {
-					inforec.notdone.copy_wronglabels++;
-				}
+				inforec.notdone.copy_wronglabels++;
 			}
 		}
 	}
@@ -3678,7 +4009,7 @@ uint8_t chunk_labelset_can_be_fulfilled(uint8_t labelcnt,uint32_t **labelmasks) 
 		}
 	}
 
-	if (allcsids > stdcsids) {
+	if (allcsids > olcsids) {
 		matching = do_perfect_match(labelcnt,allcscnt,labelmasks,allcsids);
 
 		r = 1;
@@ -3790,6 +4121,9 @@ void chunk_jobs_main(void) {
 #ifdef MFSDEBUG
 		l = chunks_priority_leng[j];
 #endif
+		if (lc > (1.0 - chunks_priority_mincpsperc[j])*HashCPTMax) { // prevent starvation of lowest priority chunks by highest priority chunks
+			lc = HashCPTMax * (1.0 - chunks_priority_mincpsperc[j]);
+		}
 		if (chunks_priority_leng[j]>0 && lc<HashCPTMax) {
 			h = chunks_priority_head[j];
 			t = chunks_priority_tail[j];
@@ -3876,7 +4210,6 @@ void chunk_jobs_main(void) {
 /* ---- */
 
 #define CHUNKFSIZE 17
-#define CHUNKCNT 1000
 /*
 void chunk_text_dump(FILE *fd) {
 	chunk *c;
@@ -3947,10 +4280,10 @@ int chunk_load(bio *fd,uint8_t mver) {
 
 uint8_t chunk_store(bio *fd) {
 	uint8_t hdr[8];
-	uint8_t storebuff[CHUNKFSIZE*CHUNKCNT];
+	uint8_t storebuff[CHUNKFSIZE];
 	uint8_t *ptr;
 	uint8_t archflag;
-	uint32_t i,j;
+	uint32_t i;
 	chunk *c;
 // chunkdata
 	uint64_t chunkid;
@@ -3966,10 +4299,9 @@ uint8_t chunk_store(bio *fd) {
 	if (bio_write(fd,hdr,8)!=8) {
 		return 0xFF;
 	}
-	j=0;
-	ptr = storebuff;
 	for (i=0 ; i<chunkrehashpos ; i++) {
 		for (c=chunkhashtab[i>>HASHTAB_LOBITS][i&HASHTAB_MASK] ; c ; c=c->next) {
+			ptr = storebuff;
 			chunkid = c->chunkid;
 			put64bit(&ptr,chunkid);
 			version = c->version;
@@ -3981,19 +4313,13 @@ uint8_t chunk_store(bio *fd) {
 			put32bit(&ptr,lockedto);
 			archflag = c->archflag;
 			put8bit(&ptr,archflag);
-			j++;
-			if (j==CHUNKCNT) {
-				if (bio_write(fd,storebuff,CHUNKFSIZE*CHUNKCNT)!=(CHUNKFSIZE*CHUNKCNT)) {
-					return 0xFF;
-				}
-				j=0;
-				ptr = storebuff;
+			if (bio_write(fd,storebuff,CHUNKFSIZE)!=CHUNKFSIZE) {
+				return 0xFF;
 			}
 		}
 	}
-	memset(ptr,0,CHUNKFSIZE);
-	j++;
-	if (bio_write(fd,storebuff,CHUNKFSIZE*j)!=(CHUNKFSIZE*j)) {
+	memset(storebuff,0,CHUNKFSIZE);
+	if (bio_write(fd,storebuff,CHUNKFSIZE)!=CHUNKFSIZE) {
 		return 0xFF;
 	}
 	return 0;
@@ -4115,17 +4441,53 @@ void chunk_term(void) {
 	free(regularchunkcounts);
 }
 
+void chunk_load_cfg_common(void) {
+	uint32_t uniqmode;
+
+	uniqmode = cfg_getuint32("CHUNKS_UNIQUE_MODE",0);
+
+	DoNotUseSameIP=0;
+	DoNotUseSameRack=0;
+	LabelUniqueMask=0;
+
+	if (uniqmode==1) {
+		DoNotUseSameIP=1;
+	} else if (uniqmode==2) {
+		DoNotUseSameRack=1;
+	}
+
+	ReplicationsDelayInit = cfg_getuint32("REPLICATIONS_DELAY_INIT",60);
+	ReplicationsRespectTopology = cfg_getuint8("REPLICATIONS_RESPECT_TOPOLOGY",0);
+
+	if (cfg_isdefined("ACCEPTABLE_PERCENTAGE_DIFFERENCE")) {
+		AcceptableDifference = cfg_getdouble("ACCEPTABLE_PERCENTAGE_DIFFERENCE",1.0)/100.0; // 1%
+	} else {
+		AcceptableDifference = cfg_getdouble("ACCEPTABLE_DIFFERENCE",0.01); // 1% - deprecated option
+	}
+	if (AcceptableDifference<0.001) { // 0.1%
+		AcceptableDifference = 0.001;
+	}
+	if (AcceptableDifference>0.1) { // 10%
+		AcceptableDifference = 0.1;
+	}
+
+	DangerMaxLeng = cfg_getuint32("PRIORITY_QUEUES_LENGTH",1000000);
+	if (DangerMaxLeng<10000) {
+		DangerMaxLeng = 10000;
+	}
+}
+
 void chunk_reload(void) {
 	uint32_t oldMaxDelSoftLimit,oldMaxDelHardLimit,oldDangerMaxLeng;
 	uint32_t cps,i,j;
 	char *repstr;
 
-	ReplicationsDelayInit = cfg_getuint32("REPLICATIONS_DELAY_INIT",60);
-//	ReplicationsDelayDisconnect = cfg_getuint32("REPLICATIONS_DELAY_DISCONNECT",3600);
-
+	oldDangerMaxLeng = DangerMaxLeng;
 
 	oldMaxDelSoftLimit = MaxDelSoftLimit;
 	oldMaxDelHardLimit = MaxDelHardLimit;
+
+	chunk_load_cfg_common();
 
 	MaxDelSoftLimit = cfg_getuint32("CHUNKS_SOFT_DEL_LIMIT",10);
 	if (cfg_isdefined("CHUNKS_HARD_DEL_LIMIT")) {
@@ -4220,23 +4582,6 @@ void chunk_reload(void) {
 		HashCPTMax = ((cps+(TICKSPERSECOND-1))/TICKSPERSECOND);
 	}
 
-	if (cfg_isdefined("ACCEPTABLE_PERCENTAGE_DIFFERENCE")) {
-		AcceptableDifference = cfg_getdouble("ACCEPTABLE_PERCENTAGE_DIFFERENCE",1.0)/100.0; // 1%
-	} else {
-		AcceptableDifference = cfg_getdouble("ACCEPTABLE_DIFFERENCE",0.01); // 1% - deprecated option
-	}
-	if (AcceptableDifference<0.001) { // 1%
-		AcceptableDifference = 0.001;
-	}
-	if (AcceptableDifference>0.1) { // 10%
-		AcceptableDifference = 0.1;
-	}
-
-	oldDangerMaxLeng = DangerMaxLeng;
-	DangerMaxLeng = cfg_getuint32("PRIORITY_QUEUES_LENGTH",1000000);
-	if (DangerMaxLeng<10000) {
-		DangerMaxLeng = 10000;
-	}
 	if (DangerMaxLeng != oldDangerMaxLeng) {
 		for (j=0 ; j<DANGER_PRIORITIES ; j++) {
 			if (chunks_priority_leng[j]>0) {
@@ -4266,8 +4611,9 @@ int chunk_strinit(void) {
 	char *repstr;
 
 	starttime = main_time();
-	ReplicationsDelayInit = cfg_getuint32("REPLICATIONS_DELAY_INIT",60);
-//	ReplicationsDelayDisconnect = cfg_getuint32("REPLICATIONS_DELAY_DISCONNECT",3600);
+
+	chunk_load_cfg_common();
+
 	MaxDelSoftLimit = cfg_getuint32("CHUNKS_SOFT_DEL_LIMIT",10);
 	if (cfg_isdefined("CHUNKS_HARD_DEL_LIMIT")) {
 		MaxDelHardLimit = cfg_getuint32("CHUNKS_HARD_DEL_LIMIT",25);
@@ -4350,21 +4696,7 @@ int chunk_strinit(void) {
 		}
 		HashCPTMax = ((cps+(TICKSPERSECOND-1))/TICKSPERSECOND);
 	}
-	if (cfg_isdefined("ACCEPTABLE_PERCENTAGE_DIFFERENCE")) {
-		AcceptableDifference = cfg_getdouble("ACCEPTABLE_PERCENTAGE_DIFFERENCE",1.0)/100.0; // 1%
-	} else {
-		AcceptableDifference = cfg_getdouble("ACCEPTABLE_DIFFERENCE",0.01); // 1% - deprecated option
-	}
-	if (AcceptableDifference<0.001) { // 0.1%
-		AcceptableDifference = 0.001;
-	}
-	if (AcceptableDifference>0.1) { // 10%
-		AcceptableDifference = 0.1;
-	}
-	DangerMaxLeng = cfg_getuint32("PRIORITY_QUEUES_LENGTH",1000000);
-	if (DangerMaxLeng<10000) {
-		DangerMaxLeng = 10000;
-	}
+
 	chunk_hash_init();
 //	for (i=0 ; i<HASHSIZE ; i++) {
 //		chunkhash[i]=NULL;
@@ -4414,6 +4746,11 @@ int chunk_strinit(void) {
 	}
 	chunk_do_jobs(NULL,JOBS_INIT,0,main_time(),0);	// clear chunk loop internal data, and allocate tabs
 	chunk_priority_queue_check(NULL,0); // allocate 'servers' tab
+
+#ifdef MFSDEBUG
+	mfsdebug(NULL);
+	main_time_register(1,0,mfsdebug_flush);
+#endif
 
 	main_reload_register(chunk_reload);
 	// main_time_register(1,0,chunk_jobs_main);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -131,7 +131,7 @@ static inline uint32_t get32bit(const uint8_t **ptr) {
 }
 
 static inline uint16_t get16bit(const uint8_t **ptr) {
-	uint32_t t16;
+	uint16_t t16;
 #ifdef FAST_DATAPACK
 	memcpy(&t16,*ptr,2);
 	(*ptr)+=2;
@@ -148,7 +148,7 @@ static inline uint16_t get16bit(const uint8_t **ptr) {
 }
 
 static inline uint8_t get8bit(const uint8_t **ptr) {
-	uint32_t t8;
+	uint8_t t8;
 	t8=(*ptr)[0];
 	(*ptr)++;
 	return t8;

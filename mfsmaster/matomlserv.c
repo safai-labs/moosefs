@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -48,6 +48,7 @@
 #include "crc.h"
 #include "cfg.h"
 #include "main.h"
+#include "sizestr.h"
 #include "sockets.h"
 #include "slogger.h"
 #include "massert.h"
@@ -56,7 +57,6 @@
 
 #define MaxPacketSize ANTOMA_MAXPACKETSIZE
 
-#define META_DL_BLOCK ((((MATOAN_MAXPACKETSIZE) - 1000) < 1000000) ? ((MATOAN_MAXPACKETSIZE) - 1000) : 1000000)
 
 #define OLD_CHANGES_GROUP_COUNT 10000
 
@@ -143,6 +143,7 @@ static uint16_t listenport;
 
 
 static uint32_t BackMetaCopies;
+
 
 // static uint16_t ChangelogSecondsToRemember;
 
@@ -600,7 +601,7 @@ void matomlserv_broadcast_logstring(uint64_t version,uint8_t *logstr,uint32_t lo
 	}
 }
 
-void matomlserv_broadcast_logrotate() {
+void matomlserv_broadcast_logrotate(void) {
 	matomlserventry *eptr;
 	uint8_t *data;
 
@@ -735,7 +736,7 @@ void matomlserv_read(matomlserventry *eptr,double now) {
 			leng = get32bit(&ptr);
 
 			if (leng>MaxPacketSize) {
-				syslog(LOG_WARNING,"ML(%s) packet too long (%"PRIu32"/%u)",eptr->servstrip,leng,MaxPacketSize);
+				syslog(LOG_WARNING,"ML(%s) packet too long (%"PRIu32"/%u) ; command:%"PRIu32,eptr->servstrip,leng,MaxPacketSize,type);
 				eptr->input_end = 1;
 				return;
 			}
@@ -1060,6 +1061,12 @@ void matomlserv_keep_alive(void) {
 	}
 }
 
+void matomlserv_close_lsock(void) { // after fork
+	if (lsock>=0) {
+		close(lsock);
+	}
+}
+
 void matomlserv_term(void) {
 	matomlserventry *eptr,*eaptr;
 	in_packetstruct *ipptr,*ipaptr;
@@ -1118,16 +1125,20 @@ uint16_t matomlserv_getport(void) {
 	return listenport;
 }
 
+void matomlserv_reload_common(void) {
+	BackMetaCopies = cfg_getuint32("BACK_META_KEEP_PREVIOUS",1);
+	if (BackMetaCopies>99) {
+		BackMetaCopies=99;
+	}
+}
+
 void matomlserv_reload(void) {
 	char *oldListenHost,*oldListenPort;
 	uint32_t oldlistenip;
 	uint16_t oldlistenport;
 	int newlsock;
 
-	BackMetaCopies = cfg_getuint32("BACK_META_KEEP_PREVIOUS",1);
-	if (BackMetaCopies>99) {
-		BackMetaCopies=99;
-	}
+	matomlserv_reload_common();
 
 	oldListenHost = ListenHost;
 	oldListenPort = ListenPort;
@@ -1194,10 +1205,7 @@ void matomlserv_reload(void) {
 }
 
 int matomlserv_init(void) {
-	BackMetaCopies = cfg_getuint32("BACK_META_KEEP_PREVIOUS",1);
-	if (BackMetaCopies>99) {
-		BackMetaCopies=99;
-	}
+	matomlserv_reload_common();
 
 	ListenHost = cfg_getstr("MATOML_LISTEN_HOST","*");
 	ListenPort = cfg_getstr("MATOML_LISTEN_PORT",DEFAULT_MASTER_CONTROL_PORT);

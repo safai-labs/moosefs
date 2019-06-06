@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -75,6 +75,9 @@
 #include <sys/resource.h>
 #include <grp.h>
 #include <pwd.h>
+#ifdef USE_PTHREADS
+#include <pthread.h>
+#endif
 
 #define STR_AUX(x) #x
 #define STR(x) STR_AUX(x)
@@ -89,6 +92,7 @@
 #include "massert.h"
 #include "slogger.h"
 #include "portable.h"
+#include "processname.h"
 
 #define RM_RESTART 0
 #define RM_START 1
@@ -183,6 +187,9 @@ typedef struct timeentry {
 
 static timeentry *timehead=NULL;
 
+#ifdef USE_PTHREADS
+static pthread_mutex_t nowlock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static uint32_t now;
 static uint64_t usecnow;
 //static int alcnt=0;
@@ -405,7 +412,15 @@ int canexit() {
 }
 
 uint32_t main_time() {
+#ifdef USE_PTHREADS
+	uint32_t ret;
+	zassert(pthread_mutex_lock(&nowlock));
+	ret = now;
+	zassert(pthread_mutex_unlock(&nowlock));
+	return ret;
+#else
 	return now;
+#endif
 }
 
 /*
@@ -421,13 +436,31 @@ static inline void destruct(void) {
 }
 
 void main_keep_alive(void) {
+	uint64_t useclast;
 	struct timeval tv;
+	kaentry *kait;
+
 	gettimeofday(&tv,NULL);
+	useclast = usecnow;
 	usecnow = tv.tv_sec;
 	usecnow *= 1000000;
 	usecnow += tv.tv_usec;
+#ifdef USE_PTHREADS
+	zassert(pthread_mutex_lock(&nowlock));
+#endif
 	now = tv.tv_sec;
-	kaentry *kait;
+#ifdef USE_PTHREADS
+	zassert(pthread_mutex_unlock(&nowlock));
+#endif
+	if (usecnow>useclast && useclast>0) {
+		useclast = usecnow - useclast;
+	} else {
+		useclast = 0;
+	}
+	if (useclast > 5000000) {
+		syslog(LOG_WARNING,"long loop detected (%"PRIu64".%06"PRIu32"s)",useclast/1000000,(uint32_t)(useclast%1000000));
+	}
+
 	for (kait = kahead ; kait!=NULL ; kait=kait->next ) {
 		kait->fun();
 	}
@@ -435,6 +468,7 @@ void main_keep_alive(void) {
 
 void mainloop() {
 	uint64_t prevtime = 0;
+	uint64_t useclast;
 	struct timeval tv;
 	pollentry *pollit;
 	eloopentry *eloopit;
@@ -460,10 +494,25 @@ void mainloop() {
 		}
 		i = poll(pdesc,ndesc,10);
 		gettimeofday(&tv,NULL);
+		useclast = usecnow;
 		usecnow = tv.tv_sec;
 		usecnow *= 1000000;
 		usecnow += tv.tv_usec;
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_lock(&nowlock));
+#endif
 		now = tv.tv_sec;
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_unlock(&nowlock));
+#endif
+		if (usecnow>useclast && useclast>0) {
+			useclast = usecnow - useclast;
+		} else {
+			useclast = 0;
+		}
+		if (useclast > 5000000) {
+			syslog(LOG_WARNING,"long loop detected (%"PRIu64".%06"PRIu32"s)",useclast/1000000,(uint32_t)(useclast%1000000));
+		}
 		if (i<0) {
 			if (!ERRNO_ERROR) {
 				syslog(LOG_WARNING,"poll returned EAGAIN");
@@ -549,7 +598,7 @@ void mainloop() {
 			pid_t pid;
 			int status;
 
-			while ( (pid = waitpid(-1,&status,WNOHANG)) >= 0) {
+			while ( (pid = waitpid(-1,&status,WNOHANG)) > 0) {
 				chldptr = &chldhead;
 				while ((chldit = *chldptr)) {
 					if (chldit->pid == pid) {
@@ -602,7 +651,13 @@ int initialize(void) {
 	int ok;
 	ok = 1;
 	for (i=0 ; (long int)(RunTab[i].fn)!=0 && ok ; i++) {
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_lock(&nowlock));
+#endif
 		now = time(NULL);
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_unlock(&nowlock));
+#endif
 		if (RunTab[i].fn()<0) {
 			mfs_arg_syslog(LOG_ERR,"init: %s failed !!!",RunTab[i].name);
 			ok=0;
@@ -616,13 +671,25 @@ int initialize_late(void) {
 	int ok;
 	ok = 1;
 	for (i=0 ; (long int)(LateRunTab[i].fn)!=0 && ok ; i++) {
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_lock(&nowlock));
+#endif
 		now = time(NULL);
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_unlock(&nowlock));
+#endif
 		if (LateRunTab[i].fn()<0) {
 			mfs_arg_syslog(LOG_ERR,"init: %s failed !!!",RunTab[i].name);
 			ok=0;
 		}
 	}
+#ifdef USE_PTHREADS
+	zassert(pthread_mutex_lock(&nowlock));
+#endif
 	now = time(NULL);
+#ifdef USE_PTHREADS
+	zassert(pthread_mutex_unlock(&nowlock));
+#endif
 	return ok;
 }
 
@@ -1156,6 +1223,11 @@ int main(int argc,char **argv) {
 #if defined(USE_PTHREADS) && defined(M_ARENA_MAX) && defined(M_ARENA_TEST) && defined(HAVE_MALLOPT)
 	uint32_t limit_glibc_arenas;
 #endif
+	int argc_back;
+	char **argv_back;
+
+	argc_back = argc;
+	argv_back = argv;
 
 	strerr_init();
 	mycrc32_init();
@@ -1192,6 +1264,7 @@ int main(int argc,char **argv) {
 			case 'd':
 				printf("option '-d' is deprecated - use '-f' instead\n");
 				// no break on purpose
+				nobreak;
 			case 'f':
 				rundaemon=0;
 				break;
@@ -1268,6 +1341,8 @@ int main(int argc,char **argv) {
 		fprintf(stderr,"can't load config file: %s - using defaults\n",cfgfile);
 	}
 	free(cfgfile);
+
+	processname_init(argc_back,argv_back); // prepare everything for 'processname_set'
 
 	logappname = cfg_getstr("SYSLOG_IDENT",STR(APPNAME));
 
@@ -1503,9 +1578,9 @@ int main(int argc,char **argv) {
 	signal_cleanup();
 	cfg_term();
 	strerr_term();
-	closelog();
-	free(logappname);
 	wdunlock();
 	mfs_arg_syslog(LOG_NOTICE,"process exited successfully (status:%d)",ch);
+	closelog();
+	free(logappname);
 	return ch;
 }

@@ -1,4 +1,4 @@
-.TH mfsmount "8" "August 2017" "MooseFS 3.0.97-1" "This is part of MooseFS"
+.TH mfsmount "8" "May 2019" "MooseFS 3.0.105-1" "This is part of MooseFS"
 .SH NAME
 mfsmount \- mount Moose File System
 .SH SYNOPSIS
@@ -73,6 +73,9 @@ mount specified MooseFS directory (default is /, i.e. whole filesystem)
 .TP
 \fB\-o mfspassword=\fP\fIPASSWORD\fP
 authenticate to MooseFS master with \fIPASSWORD\fP
+.TP
+\fB\-o mfspassfile=\fP\fIFILENAME\fP
+authenticate to MooseFS master with password stored in first line of file pointed by \fIFILENAME\fP
 .TP
 \fB\-o mfsmd5pass=\fP\fIMD5\fP
 authenticate to MooseFS master using directly given \fIMD5\fP (only if
@@ -263,7 +266,7 @@ Linux:
 .SH "REPORTING BUGS"
 Report bugs to <bugs@moosefs.com>.
 .SH COPYRIGHT
-Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 
 This file is part of MooseFS.
 

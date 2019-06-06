@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -83,6 +83,7 @@ int32_t unixtowrite(int sock,const void *buff,uint32_t leng,uint32_t msecto);
 int32_t unixtoforward(int srcsock,int dstsock,void *buff,uint32_t leng,uint32_t rcvd,uint32_t sent,uint32_t msecto);
 int unixtoaccept(int sock,uint32_t msecto);
 int unixaccept(int lsock);
+#define unixclose close
 #endif
 
 #endif

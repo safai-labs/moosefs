@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -62,7 +62,7 @@
 // has to be less than MaxPacketSize on master side divided by 12
 #define NEWCHUNKLIMIT 25000
 
-#define REPORT_LOAD_FREQ 60
+#define REPORT_LOAD_FREQ 5
 #define REPORT_SPACE_FREQ 1
 
 // force disconnection X seconds after term signal
@@ -149,6 +149,8 @@ static uint16_t ChunkServerID = 0;
 static uint64_t MetaID = 0;
 static char *AuthCode = NULL;
 
+static uint64_t hddmetaid;
+
 // static FILE *logfd;
 
 void masterconn_stats(uint64_t *bin,uint64_t *bout) {
@@ -166,6 +168,7 @@ static inline void masterconn_initcsid(void) {
 	if (csidvalid) {
 		return;
 	}
+	hddmetaid = 0;
 	ChunkServerID = 0;
 	MetaID = 0;
 	csidvalid = 1;
@@ -193,8 +196,12 @@ uint64_t masterconn_getmetaid(void) {
 	return MetaID;
 }
 
-void masterconn_setmetaid(uint64_t metaid) {
-	MetaID = metaid;
+uint64_t masterconn_gethddmetaid() {
+	return hddmetaid;
+}
+
+void masterconn_sethddmetaid(uint64_t metaid) {
+	hddmetaid = metaid;
 }
 
 static inline void masterconn_setcsid(uint16_t csid,uint64_t metaid) {
@@ -219,6 +226,7 @@ static inline void masterconn_setcsid(uint16_t csid,uint64_t metaid) {
 		} else {
 			syslog(LOG_WARNING,"can't store chunkserver id (open error)");
 		}
+		hdd_setmetaid(MetaID);
 	}
 }
 
@@ -467,9 +475,17 @@ void masterconn_master_ack(masterconn *eptr,const uint8_t *data,uint32_t length)
 		if (length>=17) {
 			metaid = get64bit(&data);
 			if (metaid>0 && MetaID>0 && metaid!=MetaID) { // wrong MFS instance - abort
-				syslog(LOG_WARNING,"MATOCS_MASTER_ACK - wrong meta data id. Can't connect to master");
+				syslog(LOG_WARNING,"MATOCS_MASTER_ACK - wrong meta data id (file chunkserverid.mfs:%016"PRIX64" ; received from master:%016"PRIX64"). Can't connect to master",MetaID,metaid);
 				eptr->registerstate = REGISTERED; // do not switch to register ver. 5
 				eptr->mode = KILL;
+				main_exit(); // this can't be fixed, so we should quit
+				return;
+			}
+			if (metaid>0 && MetaID==0 && hddmetaid>0 && metaid!=hddmetaid) { // metaid from hard drives doesn't match master's metaid
+				syslog(LOG_WARNING,"MATOCS_MASTER_ACK - wrong meta data id (files .metaid:%016"PRIX64" ; received from master:%016"PRIX64"). Can't connect to master",hddmetaid,metaid);
+				eptr->registerstate = REGISTERED; // do not switch to register ver. 5
+				eptr->mode = KILL;
+				main_exit(); // this can't be fixed, so we should quit
 				return;
 			}
 		}
@@ -650,6 +666,10 @@ void masterconn_send_disconnect_command(void) {
 		syslog(LOG_NOTICE,"sending unregister command ...");
 		buff = masterconn_create_attached_packet(eptr,CSTOMA_REGISTER,1);
 		put8bit(&buff,63);
+		eptr->mode = CLOSE;
+	} else if (eptr->mode!=FREE) {
+		syslog(LOG_NOTICE,"killing master connection");
+		eptr->mode = KILL;
 	}
 }
 
@@ -657,14 +677,19 @@ void masterconn_heavyload(uint32_t load,uint8_t hlstatus) {
 	masterconn *eptr = masterconnsingleton;
 	uint8_t *buff;
 	uint8_t hltosend;
+	uint8_t rebalance;
 
 	if (eptr->registerstate==REGISTERED && eptr->mode==DATA && eptr->masterversion>=VERSION2INT(3,0,7)) {
 		if (hlstatus != eptr->hlstatus) {
 			hltosend = hlstatus;
-			if (hlstatus!=2 && hdd_is_rebalance_on()) {
+			rebalance = hdd_is_rebalance_on();
+			if (rebalance&2) { // in high speed rebalance force 'overloaded' status
+				hltosend = 2;
+			}
+			if (hlstatus!=2 && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
 				hltosend = 3;
 			}
-			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) {
+			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) { // does master know about 'rebalance' status? if not then send 'overloaded'
 				hltosend = 2;
 			}
 			buff = masterconn_create_attached_packet(eptr,CSTOMA_CURRENT_LOAD,5);
@@ -675,7 +700,7 @@ void masterconn_heavyload(uint32_t load,uint8_t hlstatus) {
 	}
 }
 
-void masterconn_check_hdd_space() {
+void masterconn_check_hdd_space(void) {
 	masterconn *eptr = masterconnsingleton;
 	uint8_t *buff;
 	if ((eptr->registerstate==REGISTERED || eptr->registerstate==INPROGRESS) && eptr->mode==DATA) {
@@ -694,7 +719,7 @@ void masterconn_check_hdd_space() {
 	}
 }
 
-void masterconn_check_hdd_reports() {
+void masterconn_check_hdd_reports(void) {
 	masterconn *eptr = masterconnsingleton;
 	uint32_t errorcounter;
 	uint32_t chunkcounter;
@@ -733,15 +758,20 @@ void masterconn_reportload(void) {
 	masterconn *eptr = masterconnsingleton;
 	uint32_t load;
 	uint8_t hltosend;
+	uint8_t rebalance;
 	uint8_t *buff;
 	if (eptr->mode==DATA && eptr->masterversion>=VERSION2INT(1,6,28) && eptr->registerstate==REGISTERED) {
 		load = job_getload();
 		if (eptr->masterversion>=VERSION2INT(3,0,7)) {
 			hltosend = eptr->hlstatus;
-			if (hltosend!=2 && hdd_is_rebalance_on()) {
+			rebalance = hdd_is_rebalance_on();
+			if (rebalance&2) { // in high speed rebalance force 'overloaded' status
+				hltosend = 2;
+			}
+			if (hltosend!=2 && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
 				hltosend = 3;
 			}
-			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) {
+			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) { // does master know about 'rebalance' status? if not then send 'overloaded'
 				hltosend = 2;
 			}
 			buff = masterconn_create_attached_packet(eptr,CSTOMA_CURRENT_LOAD,5);
@@ -1019,14 +1049,14 @@ void masterconn_idlejob_finished(uint8_t status,void *ijp) {
 				if (status!=MFS_STATUS_OK) {
 					ptr = masterconn_create_attached_packet(eptr,CSTOAN_CHUNK_CHECKSUM_TAB,8+4+1);
 				} else {
-					ptr = masterconn_create_attached_packet(eptr,CSTOAN_CHUNK_CHECKSUM_TAB,8+4+4096);
+					ptr = masterconn_create_attached_packet(eptr,CSTOAN_CHUNK_CHECKSUM_TAB,8+4+4*MFSBLOCKSINCHUNK);
 				}
 				put64bit(&ptr,ij->chunkid);
 				put32bit(&ptr,ij->version);
 				if (status!=MFS_STATUS_OK) {
 					put8bit(&ptr,status);
 				} else {
-					memcpy(ptr,ij->buff,4096);
+					memcpy(ptr,ij->buff,4*MFSBLOCKSINCHUNK);
 				}
 				break;
 		}
@@ -1086,7 +1116,7 @@ void masterconn_get_chunk_checksum_tab(masterconn *eptr,const uint8_t *data,uint
 		eptr->mode = KILL;
 		return;
 	}
-	ij = malloc(offsetof(idlejob,buff)+4096);
+	ij = malloc(offsetof(idlejob,buff)+4*MFSBLOCKSINCHUNK);
 	ij->op = IJ_GET_CHUNK_CHECKSUM_TAB;
 	ij->chunkid = get64bit(&data);
 	ij->version = get32bit(&data);
@@ -1345,7 +1375,7 @@ void masterconn_read(masterconn *eptr,double now) {
 			leng = get32bit(&ptr);
 
 			if (leng>MaxPacketSize) {
-				syslog(LOG_WARNING,"Master packet too long (%"PRIu32"/%u)",leng,MaxPacketSize);
+				syslog(LOG_WARNING,"Master packet too long (%"PRIu32"/%u) ; command:%"PRIu32,leng,MaxPacketSize,type);
 				eptr->input_end = 1;
 				return;
 			}
@@ -1500,7 +1530,7 @@ void masterconn_desc(struct pollfd *pdesc,uint32_t *ndesc) {
 	if (eptr->mode==DATA && eptr->input_end==0) {
 		pdesc[pos].events |= POLLIN;
 	}
-	if ((eptr->mode==DATA && eptr->outputhead!=NULL) || eptr->mode==CONNECTING) {
+	if (((eptr->mode==DATA || eptr->mode==CLOSE) && eptr->outputhead!=NULL) || eptr->mode==CONNECTING) {
 		pdesc[pos].events |= POLLOUT;
 	}
 	if (pdesc[pos].events!=0) {
@@ -1517,9 +1547,11 @@ void masterconn_disconnection_check(void) {
 	out_packetstruct *opptr,*opaptr;
 	idlejob *ij,*nij;
 
-	if (eptr->mode == KILL || eptr->mode == CLOSE) {
+	if (eptr->mode==KILL || (eptr->mode==CLOSE && eptr->outputhead==NULL)) {
 		// masterconn_beforeclose(eptr);
+		syslog(LOG_NOTICE,"closing connection with master");
 		tcpclose(eptr->sock);
+		eptr->sock = -1;
 		if (eptr->input_packet) {
 			free(eptr->input_packet);
 		}
@@ -1585,11 +1617,11 @@ void masterconn_serve(struct pollfd *pdesc) {
 			}
 			masterconn_parse(eptr);
 		}
-		if (eptr->mode==DATA && eptr->lastwrite+(eptr->timeout/3.0)<now && eptr->outputhead==NULL) {
+		if ((eptr->mode==DATA || eptr->mode==CLOSE) && eptr->lastwrite+(eptr->timeout/3.0)<now && eptr->outputhead==NULL) {
 			masterconn_create_attached_packet(eptr,ANTOAN_NOP,0);
 		}
 		if (eptr->pdescpos>=0) {
-			if ((((pdesc[eptr->pdescpos].events & POLLOUT)==0 && (eptr->outputhead)) || (pdesc[eptr->pdescpos].revents & POLLOUT)) && eptr->mode==DATA) {
+			if ((((pdesc[eptr->pdescpos].events & POLLOUT)==0 && (eptr->outputhead)) || (pdesc[eptr->pdescpos].revents & POLLOUT)) && (eptr->mode==DATA || eptr->mode==CLOSE)) {
 				masterconn_write(eptr,now);
 			}
 		}
@@ -1598,7 +1630,8 @@ void masterconn_serve(struct pollfd *pdesc) {
 			eptr->mode = KILL;
 		}
 	}
-	if (wantexittime>0.0 && wantexittime+FORCE_DISCONNECTION_TO < now) {
+	if (eptr->mode==CLOSE && wantexittime>0.0 && wantexittime+FORCE_DISCONNECTION_TO < now) {
+		syslog(LOG_NOTICE,"masterconn: unregistering timed out");
 		eptr->mode = KILL;
 	}
 	masterconn_disconnection_check();
@@ -1667,10 +1700,8 @@ void masterconn_reload(void) {
 	MasterPort = cfg_getstr("MASTER_PORT",DEFAULT_MASTER_CS_PORT);
 	BindHost = cfg_getstr("BIND_HOST","*");
 
+	masterconn_send_disconnect_command(); // closes connection
 	eptr->masteraddrvalid = 0;
-	if (eptr->mode!=FREE) {
-		eptr->mode = KILL;
-	}
 	Timeout = cfg_getuint32("MASTER_TIMEOUT",0);
 
 	ReconnectionDelay = cfg_getuint32("MASTER_RECONNECTION_DELAY",5);
@@ -1687,7 +1718,7 @@ void masterconn_reload(void) {
 }
 
 void masterconn_wantexit(void) {
-	masterconn_send_disconnect_command();
+	masterconn_send_disconnect_command(); // closes connection
 	wantexittime = monotonic_seconds();
 }
 

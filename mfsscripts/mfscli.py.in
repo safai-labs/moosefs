@@ -1,6 +1,6 @@
 #!@PYTHON@
 
-# Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+# Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 # 
 # This file is part of MooseFS.
 # 
@@ -94,6 +94,7 @@ import sys
 import traceback
 import os
 import subprocess
+import codecs
 
 cgimode = 1 if 'GATEWAY_INTERFACE' in os.environ else 0
 
@@ -104,6 +105,12 @@ except NameError:
 
 #parse parameters and auxilinary functions
 if cgimode:
+	# in CGI mode set default output encoding to utf-8 (our html page encoding)
+	if sys.version_info[0]<3:
+		sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
+	else:
+		sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+
 	try:
 		import urllib.parse as xurllib
 	except ImportError:
@@ -151,14 +158,12 @@ if cgimode:
 		return xurllib.quote_plus(str)
 
 	def resolve(strip):
-		global UNRESOLVED
 		try:
 			return (socket.gethostbyaddr(strip))[0]
 		except Exception:
 			return UNRESOLVED
 
 	def createlink(update):
-		global fields,urlescape
 		c = []
 		for k in fields:
 			if k not in update:
@@ -169,7 +174,6 @@ if cgimode:
 		return "mfs.cgi?%s" % ("&amp;".join(c))
 
 	def createorderlink(prefix,columnid):
-		global fields,createlink
 		ordername = "%sorder" % prefix
 		revname = "%srev" % prefix
 		try:
@@ -313,6 +317,8 @@ else: # CLI mode
 			('load',28,3,'Server load'),
 			('memoryrss',29,2,'Resident memory usage'),
 			('memoryvirt',30,2,'Virtual memory usage'),
+			('movels',31,1,'Low speed move ops'),
+			('movehs',32,1,'High speed move ops'),
 			('cpu',100,0,'Cpu usage (total sys+user)')
 	]
 	ccchartsabr = {
@@ -340,9 +346,11 @@ else: # CLI mode
 	lastmode = None
 	try:
 		opts,args = getopt.getopt(sys.argv[1:],"hvH:P:S:C:f:ps:no:rm:i:a:b:c:d:28")
-	except:
+	except Exception:
 		opts = [('-h',None)]
 	for opt,val in opts:
+		if val==None:
+			val=""
 		if opt=='-h':
 			print("usage:")
 			print("\t%s [-hpn28] [-H master_host] [-P master_port] [-f 0..3] -S(IN|IM|LI|IG|MU|IC|IL|MF|CS|MB|HD|EX|MS|SC|OF|AL|MO|QU|MC|CC) [-s separator] [-o order_id [-r]] [-m mode_id] [i id] [-a count] [-b chart_data_columns] [-c count] [-d chart_data_columns]" % sys.argv[0])
@@ -423,7 +431,7 @@ else: # CLI mode
 			print("\t\t-CRS/sessionid : remove given session")
 			os._exit(0)
 		elif opt=='-v':
-			print("version: %s" % VERSION);
+			print("version: %s" % VERSION)
 			os._exit(0)
 		elif opt=='-2':
 			colormode = 2
@@ -665,7 +673,7 @@ else: # CLI mode
 					xs = x.split(':')
 					if len(xs)==2:
 						chhost = xs[0]
-						chport = 9421+datamode
+						chport = 9421
 						x = xs[1]
 					elif len(xs)==3:
 						chhost = xs[0]
@@ -696,7 +704,7 @@ else: # CLI mode
 					xs = x.split(':')
 					if len(xs)==2:
 						chhost = xs[0]
-						chport = 9421+datamode
+						chport = 9422
 						x = xs[1]
 					elif len(xs)==3:
 						chhost = xs[0]
@@ -794,6 +802,7 @@ else: # CLI mode
 	#  
 
 	class Tabble:
+		Needseparator = 0
 		def __init__(self,title,ccnt,defattr=""):
 			if tabbleframes==1:
 				if sys.version_info[0]<3:
@@ -818,7 +827,7 @@ else: # CLI mode
 			self.body = []
 			self.defattrs = []
 			self.cwidth = []
-			for i in range(ccnt):
+			for _ in range(ccnt):
 				self.defattrs.append(defattr)
 				self.cwidth.append(0)
 		def combineattr(self,attr,defattr):
@@ -1064,7 +1073,12 @@ else: # CLI mode
 					outstrtab.append("%s:%s%s" % (self.title,plaintextseparator,plaintextseparator.join(row)))
 			return outstrtab
 		def __str__(self):
-			return "\n".join(self.lines())
+			if Tabble.Needseparator:
+				sep = "\n"
+			else:
+				sep = ""
+				Tabble.Needseparator = 1
+			return sep+("\n".join(self.lines()))
 
 	#x = Tabble("Test title",4)
 	#x.header("column1","column2","column3","column4")
@@ -1291,7 +1305,6 @@ def labelmasks_to_str(labelmasks):
 
 def print_exception():
 	exc_type, exc_value, exc_traceback = sys.exc_info()
-	global cgimode,ttymode
 	try:
 		if cgimode:
 			print("""<table class="FR" cellspacing="0">""")
@@ -1315,7 +1328,7 @@ def print_exception():
 			print("""---------------------------------------------------------------- error -----------------------------------------------------------------""")
 			print(traceback.format_exc().strip())
 			print("""----------------------------------------------------------------------------------------------------------------------------------------""")
-	except:
+	except Exception:
 		print(traceback.format_exc().strip())
 
 def version_convert(version):
@@ -1548,11 +1561,7 @@ class DataProvider:
 				fip1,fip2,fip3,fip4,tip1,tip2,tip3,tip4,pleng = struct.unpack(">BBBBBBBBL",data[pos:pos+12])
 				pos+=12
 				path = data[pos:pos+pleng]
-				if sys.version_info[0]>=3:
-					try:
-						path = path.decode('ascii')
-					except UnicodeDecodeError:
-						pass
+				path = path.decode('utf-8','replace')
 				pos+=pleng
 				if self.masterconn.version_at_least(3,0,72):
 					v1,v2,v3,exportflags,sesflags,umaskval,rootuid,rootgid,mapalluid,mapallgid,mingoal,maxgoal,mintrashtime,maxtrashtime = struct.unpack(">HBBBBHLLLLBBLL",data[pos:pos+34])
@@ -1616,7 +1625,7 @@ class DataProvider:
 				else:
 					sessionid,ip1,ip2,ip3,ip4,v1,v2,v3,ileng = struct.unpack(">LBBBBHBBL",data[pos:pos+16])
 					pos+=16
-					openfiles = 0;
+					openfiles = 0
 					nsocks = 1
 					expire = 0
 				info = data[pos:pos+ileng]
@@ -1625,15 +1634,8 @@ class DataProvider:
 				pos+=4
 				path = data[pos:pos+pleng]
 				pos+=pleng
-				if sys.version_info[0]>=3:
-					try:
-						info = info.decode('ascii')
-					except UnicodeDecodeError:
-						pass
-					try:
-						path = path.decode('ascii')
-					except UnicodeDecodeError:
-						pass
+				info = info.decode('utf-8','replace')
+				path = path.decode('utf-8','replace')
 				if self.masterconn.version_at_least(3,0,72):
 					sesflags,umaskval,rootuid,rootgid,mapalluid,mapallgid,mingoal,maxgoal,mintrashtime,maxtrashtime = struct.unpack(">BHLLLLBBLL",data[pos:pos+29])
 					pos+=29
@@ -1740,11 +1742,7 @@ def resolve_inodes_paths(masterconn,inodes):
 					path = data[pos:pos+pleng]
 					pos+=pleng
 					psize-=pleng
-					if sys.version_info[0]>=3:
-						try:
-							path = path.decode('ascii')
-						except UnicodeDecodeError:
-							pass
+					path = path.decode('utf-8','replace')
 					if inode not in inodepaths:
 						inodepaths[inode] = []
 					inodepaths[inode].append(path)
@@ -1826,18 +1824,19 @@ for mhost,mport in masterlist:
 				else:
 					statestr = "UPGRADE THIS UNIT !!!"
 					statecolor = 2
-			elif length==121 or length==129:
+			elif length==121 or length==129 or length==137:
+				offset = 8 if length==137 else 0
 				version = struct.unpack(">HBB",data[:4])
 				conn.set_version(version)
 				memusage,syscpu,usercpu = struct.unpack(">QQQ",data[4:28])
 				syscpu/=10000000.0
 				usercpu/=10000000.0
-				lastsuccessfulstore,lastsaveseconds,lastsavestatus = struct.unpack(">LLB",data[92:101])
+				lastsuccessfulstore,lastsaveseconds,lastsavestatus = struct.unpack(">LLB",data[offset+92:offset+101])
 				if conn.version_at_least(2,0,14):
 					lastsaveseconds = lastsaveseconds / 1000.0
-				workingstate,nextstate,stablestate,sync,leaderip,changetime,metaversion = struct.unpack(">BBBBLLQ",data[101:121])
-				if length==129:
-					exports_checksum = struct.unpack(">Q",data[121:129])[0]
+				workingstate,nextstate,stablestate,sync,leaderip,changetime,metaversion = struct.unpack(">BBBBLLQ",data[offset+101:offset+121])
+				if length>=129:
+					exports_checksum = struct.unpack(">Q",data[offset+121:offset+129])[0]
 				if workingstate==0xFF and nextstate==0xFF and stablestate==0xFF and sync==0xFF:
 					if leaderfound==0:
 						leaderconn = conn
@@ -2092,7 +2091,7 @@ else:
 						elif status==ERROR_NOTFOUND:
 							print("Chunkserver %s/%s hasn't been found" % (cmddata[1],cmddata[2]))
 						elif status==ERROR_ACTIVE:
-							print("Chunkserver %s/%s can't be removed because is still active" (cmddata[1],cmddata[2]))
+							print("Chunkserver %s/%s can't be removed because is still active" % (cmddata[1],cmddata[2]))
 						else:
 							print("Can't remove chunkserver %s/%s (status:%u)" % (cmddata[1],cmddata[2],status))
 					else:
@@ -2281,7 +2280,7 @@ if cgimode:
 	print("""<div id="header">""")
 	print("""<table class="HDR" cellpadding="0" cellspacing="0" border="0">""")
 	print("""<tr>""")
-	print("""<td class="LOGO"><a href="http://moosefs.com"><img src="/logomini.png" alt="logo" style="border:0;width:123px;height:47px" /></a></td>""")
+	print("""<td class="LOGO"><a href="http://moosefs.com"><img src="logomini.png" alt="logo" style="border:0;width:123px;height:47px" /></a></td>""")
 	print("""<td class="MENU"><table class="MENU" cellspacing="0">""")
 	print("""<tr>""")
 	last="U"
@@ -2300,9 +2299,8 @@ if cgimode:
 	print("""</tr>""")
 	print("""</table></td>""")
 	print("""<td class="FILLER" style="white-space:nowrap;">""")
-	print("""version: %s""" % VERSION)
-	#print("""<a href="http://jigsaw.w3.org/css-validator/check/referer"><img style="border:0;width:88px;height:31px" src="http://jigsaw.w3.org/css-validator/images/vcss-blue" alt="Valid CSS!" /></a>""")
-	#print("""<a href="http://validator.w3.org/check?uri=referer"><img style="border:0;width:88px;height:31px" src="http://www.w3.org/Icons/valid-xhtml10-blue" alt="Valid XHTML 1.0 Strict" /></a>""")
+	print("""CGI version: %s ; python: %u.%u<br />""" % (VERSION,sys.version_info[0],sys.version_info[1]))
+	print("""date: %s""" % time.asctime(time.localtime(time.time())))
 	print("""</td>""")
 	print("""</tr>""")
 	print("""</table>""")
@@ -2314,8 +2312,6 @@ if cgimode:
 	#"""
 
 	print("""<div id="container">""")
-
-needseparator = 0
 
 if leaderfound==0:
 	if cgimode:
@@ -2366,7 +2362,8 @@ if leaderfound==0:
 			print("Leader master server not found !!! - maybe you should run 'mfssupervisor -f -x -H %s -P %u'" % (masterhost,mastercontrolport))
 		else:
 			print("Working master servers not found !!! - maybe you are using wrong port number or wrong dns name")
-	needseparator=1
+	if not cgimode:
+		Tabble.Needseparator=1
 
 if not cgimode:
 	if leaderfound:
@@ -2380,8 +2377,10 @@ if not cgimode:
 		allowedsections = ["IN","CS","HD","EX","QU","MC","CC"]
 	elif followerfound:
 		allowedsections = ["IN","MC"]
-	else:
+	elif len(masterlist)>0:
 		allowedsections = ["IN"]
+	else:
+		sys.exit(1)
 
 	filtered_sectionset = []
 	for section in sectionset:
@@ -2585,26 +2584,15 @@ else:
 
 if "IN" in sectionset:
 	if cgimode and MFS_MESSAGE:
-		if needseparator:
-			print("""<br/>""")
-		else:
-			needseparator=1
 		out = []
 		out.append("""<table class="FR" cellspacing="0">""")
 		out.append("""<tr><th>Notice</th></tr>""")
-		out.append("""<tr><td>You are currently using GPL version of MooseFS. If you want to find out what great features are available in MooseFS Pro go to <a href="http://moosefs.com/products.html">http://moosefs.com/products.html</a></td></tr>""")
+		out.append("""<tr><td>You are currently using GPL version of MooseFS. If you want to find out what great features are available in MooseFS Pro go to <a href="https://moosefs.com/products/">https://moosefs.com/products/</a></td></tr>""")
 		out.append("""</table>""")
 		print("\n".join(out))
 
 	if "IM" in sectionsubset and len(masterlistinfo)>0:
 		try:
-			if needseparator:
-				if cgimode:
-					print("""<br/>""")
-				else:
-					print("")
-			else:
-				needseparator=1
 			if cgimode:
 				out = []
 				out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_mfsmasters" cellspacing="0">""")
@@ -2737,7 +2725,6 @@ if "IN" in sectionset:
 
 			if cgimode:
 				out.append("""</table>""")
-			if cgimode:
 				print("\n".join(out))
 			else:
 				print(tab)
@@ -2747,13 +2734,6 @@ if "IN" in sectionset:
 
 	if "IG" in sectionsubset and masterconn!=None:
 		try:
-			if needseparator:
-				if cgimode:
-					print("""<br/>""")
-				else:
-					print("")
-			else:
-				needseparator=1
 			length = len(masterinfo)
 			if length==68:
 				v1,v2,v3,total,avail,trspace,trfiles,respace,refiles,nodes,dirs,files,chunks,allcopies,tdcopies = struct.unpack(">HBBQQQLQLLLLLLL",masterinfo)
@@ -2901,8 +2881,12 @@ if "IN" in sectionset:
 					tab.append("all chunk copies",allcopies)
 					tab.append("regular chunk copies",tdcopies)
 					print(tab)
-			elif length==101 or length==121 or length==129:
-				v1,v2,v3,memusage,syscpu,usercpu,total,avail,trspace,trfiles,respace,refiles,nodes,dirs,files,chunks,allcopies,tdcopies,lastsuccessfulstore,lastsaveseconds,lastsavestatus = struct.unpack(">HBBQQQQQQLQLLLLLLLLLB",masterinfo[:101])
+			elif length==101 or length==121 or length==129 or length==137:
+				if length>=137:
+					v1,v2,v3,memusage,syscpu,usercpu,totalspace,availspace,freespace,trspace,trfiles,respace,refiles,nodes,dirs,files,chunks,allcopies,tdcopies,lastsuccessfulstore,lastsaveseconds,lastsavestatus = struct.unpack(">HBBQQQQQQQLQLLLLLLLLLB",masterinfo[:109])
+				else:
+					v1,v2,v3,memusage,syscpu,usercpu,totalspace,availspace,trspace,trfiles,respace,refiles,nodes,dirs,files,chunks,allcopies,tdcopies,lastsuccessfulstore,lastsaveseconds,lastsavestatus = struct.unpack(">HBBQQQQQQLQLLLLLLLLLB",masterinfo[:101])
+					freespace = None
 				strver,sortver = version_str_and_sort((v1,v2,v3))
 				syscpu/=10000000.0
 				usercpu/=10000000.0
@@ -2942,12 +2926,13 @@ if "IN" in sectionset:
 							out.append("""		<td align="center">-</td>""")
 						out.append("""	</tr>""")
 						out.append("""</table>""")
-						out.append("""<br/>""")
 					out.append("""<table class="FR" cellspacing="0">""")
-					out.append("""	<tr><th colspan="12">Metadata Info</th></tr>""")
+					out.append("""	<tr><th colspan="%u">Metadata Info</th></tr>""" % (12 if freespace==None else 13))
 					out.append("""	<tr>""")
 					out.append("""		<th>total space</th>""")
 					out.append("""		<th>avail space</th>""")
+					if freespace!=None:
+						out.append("""		<th>free space</th>""")
 					out.append("""		<th>trash space</th>""")
 					out.append("""		<th>trash files</th>""")
 					out.append("""		<th>sustained space</th>""")
@@ -2960,8 +2945,10 @@ if "IN" in sectionset:
 					out.append("""		<th><a style="cursor:default" title="only chunks from 'regular' hdd space">regular chunk copies</a></th>""")
 					out.append("""	</tr>""")
 					out.append("""	<tr>""")
-					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(total),humanize_number(total,"&nbsp;")))
-					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(avail),humanize_number(avail,"&nbsp;")))
+					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(totalspace),humanize_number(totalspace,"&nbsp;")))
+					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(availspace),humanize_number(availspace,"&nbsp;")))
+					if freespace!=None:
+						out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(freespace),humanize_number(freespace,"&nbsp;")))
 					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(trspace),humanize_number(trspace,"&nbsp;")))
 					out.append("""		<td align="center">%u</td>""" % trfiles)
 					out.append("""		<td align="center"><a style="cursor:default" title="%s B">%s</a></td>""" % (decimal_number(respace),humanize_number(respace,"&nbsp;")))
@@ -3000,12 +2987,16 @@ if "IN" in sectionset:
 					else:
 						tab.append("CPU used","not available")
 					if ttymode:
-						tab.append("total space",humanize_number(total," "))
-						tab.append("avail space",humanize_number(avail," "))
+						tab.append("total space",humanize_number(totalspace," "))
+						tab.append("avail space",humanize_number(availspace," "))
+						if freespace!=None:
+							tab.append("free space",humanize_number(freespace," "))
 						tab.append("trash space",humanize_number(trspace," "))
 					else:
-						tab.append("total space",total)
-						tab.append("avail space",avail)
+						tab.append("total space",totalspace)
+						tab.append("avail space",availspace)
+						if freespace!=None:
+							tab.append("free space",freespace)
 						tab.append("trash space",trspace)
 					tab.append("trash files",trfiles)
 					if ttymode:
@@ -3047,13 +3038,6 @@ if "IN" in sectionset:
 			print_exception()
 
 	if "MU" in sectionsubset and masterconn!=None and masterconn.version_at_least(1,7,16):
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
 		try:
 			data,length = masterconn.command(CLTOMA_MEMORY_INFO,MATOCL_MEMORY_INFO)
 			if length>=176 and length%16==0:
@@ -3225,13 +3209,6 @@ if "IN" in sectionset:
 			print_exception()
 
 	if "IC" in sectionsubset and leaderfound:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
 		try:
 			if masterconn.version_less_than(1,7,0):
 				data,length = masterconn.command(CLTOMA_CHUNKS_MATRIX,MATOCL_CHUNKS_MATRIX,struct.pack(">B",0))
@@ -3421,13 +3398,6 @@ if "IN" in sectionset:
 
 	if "IL" in sectionsubset and leaderfound:
 		try:
-			if needseparator:
-				if cgimode:
-					print("""<br/>""")
-				else:
-					print("")
-			else:
-				needseparator=1
 			data,length = masterconn.command(CLTOMA_CHUNKSTEST_INFO,MATOCL_CHUNKSTEST_INFO)
 			if length==52:
 				loopstart,loopend,del_invalid,ndel_invalid,del_unused,ndel_unused,del_dclean,ndel_dclean,del_ogoal,ndel_ogoal,rep_ugoal,nrep_ugoal,rebalnce = struct.unpack(">LLLLLLLLLLLLL",data)
@@ -3636,13 +3606,6 @@ if "IN" in sectionset:
 			print_exception()
 
 		try:
-			if needseparator:
-				if cgimode:
-					print("""<br/>""")
-				else:
-					print("")
-			else:
-				needseparator=1
 			if (masterconn.version_at_least(2,0,66) and masterconn.version_less_than(3,0,0)) or masterconn.version_at_least(3,0,19):
 				data,length = masterconn.command(CLTOMA_FSTEST_INFO,MATOCL_FSTEST_INFO,struct.pack(">B",0))
 				pver = 1
@@ -3652,10 +3615,10 @@ if "IN" in sectionset:
 			if length>=(36 + pver*8):
 				if pver==1:
 					loopstart,loopend,files,ugfiles,mfiles,mtfiles,msfiles,chunks,ugchunks,mchunks,msgbuffleng = struct.unpack(">LLLLLLLLLLL",data[:44])
-					datastr = data[44:].decode('ascii')
+					datastr = data[44:].decode('utf-8','replace')
 				else:
 					loopstart,loopend,files,ugfiles,mfiles,chunks,ugchunks,mchunks,msgbuffleng = struct.unpack(">LLLLLLLLL",data[:36])
-					datastr = data[36:].decode('ascii')
+					datastr = data[36:].decode('utf-8','replace')
 				if cgimode:
 					out = []
 					out.append("""<table class="FR" cellspacing="0">""")
@@ -3752,13 +3715,6 @@ if "IN" in sectionset:
 
 	if "MF" in sectionsubset and leaderfound and ((masterconn.version_at_least(2,0,66) and masterconn.version_less_than(3,0,0)) or masterconn.version_at_least(3,0,19)):
 		try:
-			if needseparator:
-				if cgimode:
-					print("""<br/>""")
-				else:
-					print("")
-			else:
-				needseparator=1
 			inodes = set()
 			missingchunks = []
 			if ((masterconn.version_at_least(2,0,71) and masterconn.version_less_than(3,0,0)) or masterconn.version_at_least(3,0,25)):
@@ -3821,8 +3777,6 @@ if "IN" in sectionset:
 					if mode==1:
 						out.append("""		<th rowspan="2">type&nbsp;of&nbsp;missing&nbsp;chunk</th>""")
 					out.append("""	</tr>""")
-				else:
-					needseparator=0
 			elif ttymode:
 				if mode==1:
 					tab = Tabble("Missing Files/Chunks (gathered by previous file-loop)",5)
@@ -3894,22 +3848,14 @@ if "IN" in sectionset:
 
 if "CS" in sectionset:
 	if "CS" in sectionsubset:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
-
 		try:
 			if cgimode:
 				out = []
 				out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_mfscs" cellspacing="0">""")
 				if masterconn.version_at_least(3,0,38):
-					out.append("""  <tr><th colspan="19">Chunk Servers</th></tr>""")
+					out.append("""	<tr><th colspan="19">Chunk Servers</th></tr>""")
 				elif masterconn.version_at_least(2,1,0):
-					out.append("""  <tr><th colspan="18">Chunk Servers</th></tr>""")
+					out.append("""	<tr><th colspan="18">Chunk Servers</th></tr>""")
 				elif masterconn.version_at_least(2,0,11):
 					out.append("""	<tr><th colspan="17">Chunk Servers</th></tr>""")
 				elif masterconn.version_at_least(1,7,25):
@@ -4118,7 +4064,7 @@ if "CS" in sectionset:
 						if leaderfound:
 							out.append("""		<td align="center">%s : <a href="%s">%s</a></td>""" % (mmstr,mmurl,mm))
 						else:
-							out.append("""          <td align="center">not available</td>""")
+							out.append("""		<td align="center">not available</td>""")
 					out.append("""		<td align="right">%u</td><td align="right"><span class="sortkey">%u </span><a style="cursor:default" title="%s B">%s</a></td><td align="right"><span class="sortkey">%u </span><a style="cursor:default" title="%s B">%s</a></td>""" % (chunks,used,decimal_number(used),humanize_number(used,"&nbsp;"),total,decimal_number(total),humanize_number(total,"&nbsp;")))
 					if (total>0):
 						usedpercent = (used*100.0)/total
@@ -4169,7 +4115,15 @@ if "CS" in sectionset:
 						data.append(labelstr)
 					data.append(strver)
 					if masterconn.version_at_least(1,6,28):
-						data.append(load)
+						if gracetime>=0x80000000:
+							if gracetime>=0xC0000000:
+								data.append("<%u>" % load)
+							else:
+								data.append("(%u)" % load)
+						elif gracetime>0:
+							data.append("[%u]" % load)
+						else:
+							data.append(load)
 					if masterconn.version_at_least(2,0,11):
 						if leaderfound==0:
 							data.append("not available")
@@ -4207,7 +4161,15 @@ if "CS" in sectionset:
 						data.append(labelstr)
 					data.append(strver)
 					if masterconn.version_at_least(1,6,28):
-						data.append(load)
+						if gracetime>=0x80000000:
+							if gracetime>=0xC0000000:
+								data.append("<%u>" % load)
+							else:
+								data.append("(%u)" % load)
+						elif gracetime>0:
+							data.append("[%u]" % load)
+						else:
+							data.append(load)
 					if masterconn.version_at_least(2,0,11):
 						if leaderfound==0:
 							data.append("-")
@@ -4232,7 +4194,6 @@ if "CS" in sectionset:
 			if len(dservers)>0:
 				if cgimode:
 					out.append("""</table>""")
-					out.append("""<br/>""")
 					out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_mfsdiscs" cellspacing="0">""")
 					if masterconn.version_at_least(2,0,11):
 						out.append("""	<tr><th colspan="7">Disconnected Chunk Servers</th></tr>""")
@@ -4413,14 +4374,6 @@ if "CS" in sectionset:
 			print_exception()
 
 	if "MB" in sectionsubset and leaderfound:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
-
 		try:
 			if cgimode:
 				out = []
@@ -4483,14 +4436,6 @@ if "CS" in sectionset:
 			print_exception()
 
 if "HD" in sectionset:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	try:
 		# get cs list
 		hostlist = []
@@ -4516,17 +4461,13 @@ if "HD" in sectionset:
 						entrysize = struct.unpack(">H",data[:2])[0]
 						entry = data[2:2+entrysize]
 						data = data[2+entrysize:]
-						length -= 2+entrysize;
+						length -= 2+entrysize
 						if sys.version_info[0]<3:
 							plen = ord(entry[0])
-							hddpath = entry[1:plen+1]
 						else:
 							plen = entry[0]
-							hddpath = entry[1:plen+1]
-							try:
-								hddpath = hddpath.decode('ascii')
-							except UnicodeDecodeError:
-								pass
+						hddpath = entry[1:plen+1]
+						hddpath = hddpath.decode('utf-8','replace')
 						hostpath = "%s:%u:%s" % (hoststr,port,hddpath)
 						ippath = "%s:%u:%s" % (hostip,port,hddpath)
 						sortippath = "%03u.%03u.%03u.%03u:%05u:%s" % (ip1,ip2,ip3,ip4,port,hddpath)
@@ -4932,14 +4873,6 @@ if "HD" in sectionset:
 		print_exception()
 
 if "EX" in sectionset:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	try:
 		if cgimode:
 			out = []
@@ -5065,32 +4998,32 @@ if "EX" in sectionset:
 			elif EXorder==8:
 				sf = 2-(expe.sesflags&2)
 			elif EXorder==9:
-				if meta:
+				if expe.meta:
 					sf = None
 				else:
 					sf = expe.sesflags&4
 			elif EXorder==10:
-				if meta:
+				if expe.meta:
 					sf = None
 				else:
 					sf = expe.sesflags&8
 			elif EXorder==11:
-				if meta:
+				if expe.meta:
 					sf = None
 				else:
 					sf = expe.rootuid
 			elif EXorder==12:
-				if meta:
+				if expe.meta:
 					sf = None
 				else:
 					sf = expe.rootgid
 			elif EXorder==13:
-				if meta or (expe.sesflags&16)==0:
+				if expe.meta or (expe.sesflags&16)==0:
 					sf = None
 				else:
 					sf = expe.mapalluid
 			elif EXorder==14:
-				if meta or (expe.sesflags&16)==0:
+				if expe.meta or (expe.sesflags&16)==0:
 					sf = None
 				else:
 					sf = expe.mapalguid
@@ -5217,14 +5150,6 @@ if "EX" in sectionset:
 		print_exception()
 
 if "MS" in sectionset and leaderfound:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	try:
 		if cgimode:
 			out = []
@@ -5354,7 +5279,7 @@ if "MS" in sectionset and leaderfound:
 			elif MSorder==5:
 				sf = ses.openfiles
 			elif MSorder==6:
-				if nsocks>0:
+				if ses.nsocks>0:
 					sf = ses.nsocks
 				else:
 					sf = ses.expire
@@ -5385,7 +5310,7 @@ if "MS" in sectionset and leaderfound:
 				if ses.meta:
 					sf = None
 				else:
-					sf = rootgid
+					sf = ses.rootgid
 			elif MSorder==15:
 				if ses.meta or (ses.sesflags&16)==0:
 					sf = None
@@ -5535,7 +5460,6 @@ if "MS" in sectionset and leaderfound:
 		if len(dservers)>0 and masterconn.version_at_least(1,7,8):
 			if cgimode:
 				out.append("""</table>""")
-				out.append("""<br/>""")
 				out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_mfsmounts" cellspacing="0">""")
 				out.append("""	<tr><th colspan="8">Inactive mounts (parameters)</th></tr>""")
 				out.append("""	<tr>""")
@@ -5588,14 +5512,6 @@ if "MS" in sectionset and leaderfound:
 		print_exception()
 
 if "MO" in sectionset and leaderfound:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	try:
 		if cgimode:
 			out = []
@@ -5669,19 +5585,17 @@ if "MO" in sectionset and leaderfound:
 			elif MOorder==3:
 				sf = ses.info
 			elif MOorder>=100 and MOorder<=115:
+				sfmul = -1 if cgimode else 1
 				if MOdata==0:
-					sf = ses.stats_l[MOorder-100]
+					sf = sfmul * ses.stats_l[MOorder-100]
 				else:
-					sf = ses.stats_c[MOorder-100]
-				if cgimode:
-					sf = -sf
+					sf = sfmul * ses.stats_c[MOorder-100]
 			elif MOorder==150:
+				sfmul = -1 if cgimode else 1
 				if MOdata==0:
-					sf = sum(ses.stats_l)
+					sf = sfmul * sum(ses.stats_l)
 				else:
-					sf = sum(ses.stats_c)
-				if cgimode:
-					sf = -sf
+					sf = sfmul * sum(ses.stats_c)
 			if ses.path!='.':
 				servers.append((sf,ses.host,ses.sortip,ses.strip,ses.info,ses.stats_c,ses.stats_l))
 		servers.sort()
@@ -5732,14 +5646,6 @@ if "MO" in sectionset and leaderfound:
 if "RS" in sectionset and leaderfound:
 
 	if "SC" in sectionsubset:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
-
 		try:
 			if cgimode:
 				out = []
@@ -5794,10 +5700,7 @@ if "RS" in sectionset and leaderfound:
 					sclassid,sclassnleng = struct.unpack_from(">BB",data,pos)
 					pos += 2
 					sclassname = data[pos:pos+sclassnleng]
-					try:
-						sclassname = sclassname.decode('utf-8')
-					except UnicodeDecodeError:
-						pass
+					sclassname = sclassname.decode('utf-8','replace')
 					pos += sclassnleng
 					files,dirs,stdchunks_under,archchunks_under,stdchunks_exact,archchunks_exact,stdchunks_over,archchunks_over,admin_only,create_mode,arch_delay,create_canbefulfilled,create_labelscnt,keep_canbefulfilled,keep_labelscnt,arch_canbefulfilled,arch_labelscnt = struct.unpack_from(">LLQQQQQQBBHBBBBBB",data,pos)
 					pos += 18 + 3 * 16
@@ -5957,7 +5860,7 @@ if "RS" in sectionset and leaderfound:
 							color = "#0080E0"
 						else:
 							msperc = (1.0 * mscount) / scount
-							color = "#%02X0000" % (255-255*msperc)
+							color = "#%02X0000" % int(255-255*msperc)
 						labelsarr.append("""<span style="color:%s"><a style="cursor:default" title="%u/%u servers">%s</a></span>""" % (color,mscount,scount,labelstr))
 					out.append("""		<td align="center">%u</td>""" % (len(labelsarr)))
 					out.append("""		<td align="center">%s</td>""" % ("&nbsp;,&nbsp;".join(labelsarr)))
@@ -5975,7 +5878,7 @@ if "RS" in sectionset and leaderfound:
 							color = "#0080E0"
 						else:
 							msperc = (1.0 * mscount) / scount
-							color = "#%02X0000" % (255-255*msperc)
+							color = "#%02X0000" % int(255-255*msperc)
 						labelsarr.append("""<span style="color:%s"><a style="cursor:default" title="%u/%u servers">%s</a></span>""" % (color,mscount,scount,labelstr))
 					out.append("""		<td align="center">%u</td>""" % (len(labelsarr)))
 					out.append("""		<td align="center">%s</td>""" % ("&nbsp;,&nbsp;".join(labelsarr)))
@@ -5993,7 +5896,7 @@ if "RS" in sectionset and leaderfound:
 							color = "#0080E0"
 						else:
 							msperc = (1.0 * mscount) / scount
-							color = "#%02X0000" % (255-255*msperc)
+							color = "#%02X0000" % int(255-255*msperc)
 						labelsarr.append("""<span style="color:%s"><a style="cursor:default" title="%u/%u servers">%s</a></span>""" % (color,mscount,scount,labelstr))
 					out.append("""		<td align="center">%u</td>""" % (len(labelsarr)))
 					out.append("""		<td align="center">%s</td>""" % ("&nbsp;,&nbsp;".join(labelsarr)))
@@ -6062,14 +5965,6 @@ if "RS" in sectionset and leaderfound:
 
 	inodes = set()
 	if "OF" in sectionsubset:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
-
 		try:
 			sessionsdata = {}
 			for ses in dataprovider.get_sessions():
@@ -6079,7 +5974,7 @@ if "RS" in sectionset and leaderfound:
 				out.append("""<form action="#"><table class="FR" cellspacing="0"><tr><th>Show open files for: <select name="server" size="1" onchange="document.location.href='%s&amp;OFsessionid='+this.options[this.selectedIndex].value">""" % createlink({"OFsessionid":""}))
 				if OFsessionid==0:
 					out.append("""<option value="0" selected="selected"> select session</option>""")
-				sessions = sessionsdata.keys()
+				sessions = list(sessionsdata.keys())
 				sessions.sort()
 				for sessionid in sessions:
 					host,sortipnum,ipnum,info,openfiles = sessionsdata[sessionid]
@@ -6087,7 +5982,7 @@ if "RS" in sectionset and leaderfound:
 						out.append("""<option value="%s" selected="selected">%s: %s:%s (open files: ~%u)</option>""" % (sessionid,sessionid,host,info,openfiles))
 					else:
 						out.append("""<option value="%s">%s: %s:%s (open files: ~%u)</option>""" % (sessionid,sessionid,host,info,openfiles))
-				out.append("""</select></th></tr></table></form><br/>""")
+				out.append("""</select></th></tr></table></form>""")
 				if OFsessionid!=0:
 					out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_mfsopenfiles" cellspacing="0">""")
 					out.append("""	<tr><th colspan="7">Open files by client with session id: %u</th></tr>""" % OFsessionid)
@@ -6124,37 +6019,6 @@ if "RS" in sectionset and leaderfound:
 						openfiles.append((OFsessionid,inode))
 						inodes.add(inode)
 				inodepaths = resolve_inodes_paths(masterconn,inodes)
-#				if len(inodes)>0:
-#					data,length = masterconn.command(CLTOMA_MASS_RESOLVE_PATHS,MATOCL_MASS_RESOLVE_PATHS,struct.pack(">"+len(inodes)*"L",*inodes))
-#					pos = 0
-#					while pos+8<=length:
-#						inode,psize = struct.unpack(">LL",data[pos:pos+8])
-#						pos+=8
-#						if psize == 0:
-#							if inode not in inodepaths:
-#								inodepaths[inode] = []
-#							inodepaths[inode].append("./META")
-#						elif pos + psize <= length:
-#							while psize>=4:
-#								pleng = struct.unpack(">L",data[pos:pos+4])[0]
-#								pos+=4
-#								psize-=4
-#								path = data[pos:pos+pleng]
-#								pos+=pleng
-#								psize-=pleng
-#								if sys.version_info[0]>=3:
-#									try:
-#										path = path.decode('ascii')
-#									except UnicodeDecodeError:
-#										pass
-#								if inode not in inodepaths:
-#									inodepaths[inode] = []
-#								inodepaths[inode].append(path)
-#							if psize!=0:
-#								raise RuntimeError("MFS packet malformed")
-#					if pos!=length:
-#						raise RuntimeError("MFS packet malformed")
-#				print(inodepaths)
 				ofdata = []
 				for sessionid,inode in openfiles:
 					if sessionid in sessionsdata:
@@ -6216,14 +6080,6 @@ if "RS" in sectionset and leaderfound:
 			print_exception()
 
 	if "AL" in sectionsubset:
-		if needseparator:
-			if cgimode:
-				print("""<br/>""")
-			else:
-				print("")
-		else:
-			needseparator=1
-
 		try:
 			sessionsdata = {}
 			for ses in dataprovider.get_sessions():
@@ -6243,7 +6099,7 @@ if "RS" in sectionset and leaderfound:
 							out.append("""<option value="%u" selected="selected">%u</option>""" % (inode,inode))
 						else:
 							out.append("""<option value="%u">%u</option>""" % (inode,inode))
-					out.append("""</select></th></tr></table></form><br/>""")
+					out.append("""</select></th></tr></table></form>""")
 					if ALinode!=0:
 						out.append("""<table class="acid_tab acid_tab_zebra_C1_C2 acid_tab_storageid_acquiredlocks" cellspacing="0">""")
 						out.append("""	<tr><th colspan="11">Acquired locks for inode: %u</th></tr>""" % ALinode)
@@ -6369,14 +6225,6 @@ if "RS" in sectionset and leaderfound:
 			print_exception()
 
 if "QU" in sectionset:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	try:
 		if cgimode:
 			out = []
@@ -6459,18 +6307,14 @@ if "QU" in sectionset:
 				inode,pleng = struct.unpack(">LL",data[pos:pos+8])
 				pos+=8
 				path = data[pos:pos+pleng]
-				if sys.version_info[0]>=3:
-					try:
-						path = path.decode('ascii')
-					except UnicodeDecodeError:
-						pass
+				path = path.decode('utf-8','replace')
 				pos+=pleng
 				if masterconn.version_at_least(3,0,9):
 					graceperiod,exceeded,qflags,timetoblock = struct.unpack(">LBBL",data[pos:pos+10])
-					pos+=10;
+					pos+=10
 				else:
 					exceeded,qflags,timetoblock = struct.unpack(">BBL",data[pos:pos+6])
-					pos+=6;
+					pos+=6
 					graceperiod = 0
 				sinodes,slength,ssize,srealsize = struct.unpack(">LQQQ",data[pos:pos+28])
 				pos+=28
@@ -6863,16 +6707,7 @@ if "QU" in sectionset:
 		print_exception()
 
 if "MC" in sectionset:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	out = []
-
 	try:
 		if cgimode:
 			charts = (
@@ -6939,7 +6774,7 @@ if "MC" in sectionset:
 						out.append("""<option value="%s" selected="selected">%s</option>""" % (estr,entrydesc[estr]))
 					else:
 						out.append("""<option value="%s">%s</option>""" % (estr,entrydesc[estr]))
-				out.append("""</select></th></tr></table></form><br/>""")
+				out.append("""</select></th></tr></table></form>""")
 
 			mchtmp = MCdata.split(":")
 			if len(mchtmp)==2:
@@ -6980,9 +6815,9 @@ if "MC" in sectionset:
 				if (ma_nc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.ma_url)=="undefined" || element.ma_url!=url) {
 					element.ma_url = url;
@@ -7000,9 +6835,9 @@ if "MC" in sectionset:
 				if (ma_nc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+ma_host+"&amp;port="+ma_port+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.ma_url)=="undefined" || element.ma_url!=url) {
 					element.ma_url = url;
@@ -7083,7 +6918,6 @@ if "MC" in sectionset:
 					out.append("""		</td>""")
 					out.append("""	</tr>""")
 				out.append("""</table>""")
-				out.append("""<br/>""")
 
 				out.append("""<table class="FR" cellspacing="0" cellpadding="0">""")
 				out.append("""	<tr>""")
@@ -7134,7 +6968,7 @@ if "MC" in sectionset:
 					out.append("""	var ma_vports = [%s];""" % ",".join(map(repr,[ x[1] for x in servers ])))
 					out.append("""	var ma_inames = [%s];""" % ",".join(map(repr,[ x[2] for x in servers ])))
 					out.append("""	var ma_nc = [%s];""" % ",".join(map(repr,[ x[4] for x in servers ])))
-					out.append("""	var ma_chid = %u;""" % chid);
+					out.append("""	var ma_chid = %u;""" % chid)
 					out.append("""//--><!]]>""")
 					out.append("""</script>""")
 					out.append("""<script type="text/javascript">
@@ -7158,9 +6992,9 @@ if "MC" in sectionset:
 				if (manc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.ma_url)=="undefined" || element.ma_url!=url) {
 					element.ma_url = url;
@@ -7340,16 +7174,7 @@ if "MC" in sectionset:
 		print_exception()
 
 if "CC" in sectionset:
-	if needseparator:
-		if cgimode:
-			print("""<br/>""")
-		else:
-			print("")
-	else:
-		needseparator=1
-
 	out = []
-
 	try:
 		if cgimode:
 			# get cs list
@@ -7400,6 +7225,7 @@ if "CC" in sectionset:
 				(20,'repl','number of chunk replications per minute'),
 				(21,'create','number of chunk creations per minute'),
 				(22,'delete','number of chunk deletions per minute'),
+				(108,'move','number of chunk internal rebalances per minute (low speed + high speed)'),
 				(28,'load','load - max operations in queue'),
 			)
 
@@ -7438,7 +7264,7 @@ if "CC" in sectionset:
 						out.append("""<option value="%s" selected="selected">%s</option>""" % (estr,entrydesc[estr]))
 					else:
 						out.append("""<option value="%s">%s</option>""" % (estr,entrydesc[estr]))
-				out.append("""</select></th></tr></table></form><br/>""")
+				out.append("""</select></th></tr></table></form>""")
 
 			cchtmp = CCdata.split(":")
 			if len(cchtmp)==2:
@@ -7479,9 +7305,9 @@ if "CC" in sectionset:
 				if (cs_nc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.cs_url)=="undefined" || element.cs_url!=url) {
 					element.cs_url = url;
@@ -7499,9 +7325,9 @@ if "CC" in sectionset:
 				if (cs_nc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+cs_host+"&amp;port="+cs_port+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.cs_url)=="undefined" || element.cs_url!=url) {
 					element.cs_url = url;
@@ -7582,7 +7408,6 @@ if "CC" in sectionset:
 					out.append("""		</td>""")
 					out.append("""	</tr>""")
 				out.append("""</table>""")
-				out.append("""<br/>""")
 
 				out.append("""<table class="FR" cellspacing="0" cellpadding="0">""")
 				out.append("""	<tr>""")
@@ -7659,9 +7484,9 @@ if "CC" in sectionset:
 				if (csnc) {
 					var width = element.scrollWidth;
 					var height = element.scrollHeight;
-					url = "/chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;width="+width+"&amp;height="+height+"&amp;antycache="+minutes;
 				} else {
-					url = "/chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;antycache="+minutes;
+					url = "chart.cgi?host="+vhost+"&amp;port="+vport+"&amp;id="+id+"&amp;antycache="+minutes;
 				}
 				if (typeof(element.cs_url)=="undefined" || element.cs_url!=url) {
 					element.cs_url = url;

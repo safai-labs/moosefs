@@ -2,13 +2,13 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.60)
-AC_INIT([MFS], [3.0.97], [bugs@moosefs.com], [moosefs])
+AC_INIT([MFS], [3.0.105], [bugs@moosefs.com], [moosefs])
 release=1
 
 dnl AC_CONFIG_SRCDIR([MFSCommunication.h])
 AC_CONFIG_HEADER([config.h])
 AC_CANONICAL_TARGET
-AM_INIT_AUTOMAKE([1.14 foreign subdir-objects])
+AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_SILENT_RULES([yes])
 AC_CONFIG_MACRO_DIRS([m4])
 
@@ -22,11 +22,13 @@ AC_DEFINE_UNQUOTED([VERSHEX], [(($versmaj)*0x10000+($versmid)*0x100+($versmin)*2
 #AC_DEFINE_UNQUOTED([VERSMIN], [$versmin], [Minor MFS version])
 #AC_DEFINE_UNQUOTED([VERSHEX], [(($versmaj)*0x10000+($versmid)*0x100+($versmin))], [Full MFS version as a hex number])
 AC_DEFINE_UNQUOTED([RELEASE], [$release], [Release number])
-AC_DEFINE_UNQUOTED([VERSION2INT(maj,med,min)], [((maj)*0x10000+(med)*0x100+(((maj)>1)?((min)*2):(min)))], [Version converter from human readable format to binary format used in MFS packets])
+AC_DEFINE([VERSION2INT(maj,med,min)], [((maj)*0x10000+(med)*0x100+(((maj)>1)?((min)*2):(min)))], [Version converter from human readable format to binary format used in MFS packets])
 AC_DEFINE_UNQUOTED([VERSSTR], ["${PACKAGE_VERSION}-${release}"], [MFS version - string])
 
 # Checks for programs.
+AM_PROG_AR
 AC_PROG_CC(mycc gcc llvm-gcc clang)
+AM_PROG_CC_C_O
 AC_PROG_LN_S
 AC_PROG_LIBTOOL
 
@@ -57,6 +59,7 @@ root_sbindir="xxx";
 case $target_os in
   *linux*)
 	fuse=maybe
+	bdev=maybe
 	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE -DDEFAULT_SUGID_CLEAR_MODE_EXT"
 	# Check whether exec_prefix=/usr:
 	root_sbindir="${sbindir}"
@@ -68,10 +71,12 @@ case $target_os in
   *solaris*)
 	# OpenSolaris has fuse available and is still identified as "solaris"
 	fuse=maybe
+	bdev=no
 	CPPFLAGS="$CPPFLAGS -D__EXTENSIONS__ -D_POSIX_PTHREAD_SEMANTICS -DDEFAULT_SUGID_CLEAR_MODE_OSX"
 	;;
   *darwin*)
 	fuse=maybe
+	bdev=no
 	# MacFUSE installs to different prefix than pkgconfig
 	if test -f /usr/local/lib/pkgconfig/fuse.pc ; then
 		PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
@@ -81,10 +86,12 @@ case $target_os in
 	;;
   *bsd*)
 	fuse=maybe
+	bdev=no
 	CPPFLAGS="$CPPFLAGS -DDEFAULT_SUGID_CLEAR_MODE_BSD"
 	;;
   *)
 	fuse=no
+	bdev=no
 	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE"
 	;;
 esac
@@ -101,10 +108,19 @@ AC_SEARCH_LIBS([socket], [socket])
 AC_SEARCH_LIBS([getaddrinfo], [nsl])
 # FreeBSD:
 AC_SEARCH_LIBS([kvm_open], [kvm])
-# All:
-AC_SEARCH_LIBS([round], [m])
 # Linux:
 AC_SEARCH_LIBS([clock_gettime], [rt])
+
+# We do not use AC_SEARCH_LIBS to avoid adding '-lm' to every binary
+mathlib=no
+AC_CHECK_LIB([m],[round],[ AC_CHECK_HEADERS([math.h],[mathlib=yes]) ])
+
+if test "$mathlib" = "no"; then
+	MATH_LIBS=
+else
+	MATH_LIBS=-lm
+fi
+AC_SUBST([MATH_LIBS])
 
 # Checks for header files.
 AC_HEADER_DIRENT
@@ -137,7 +153,7 @@ AC_CHECK_MEMBERS([struct stat.st_rdev])
 AC_CHECK_MEMBERS([struct stat.st_birthtime])
 AC_CHECK_MEMBERS([struct stat.st_blksize])
 AC_CHECK_MEMBERS([struct stat.st_flags])
-AC_CHECK_MEMBER([struct sockaddr_in.sin_len], [ AC_DEFINE(HAVE_SOCKADDR_SIN_LEN, 1, [Do we have sockaddr.sin_len?]) ], [], [
+AC_CHECK_MEMBER([struct sockaddr_in.sin_len], [ AC_DEFINE([HAVE_SOCKADDR_SIN_LEN], [1], [Do we have sockaddr.sin_len?]) ], [], [
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -179,7 +195,7 @@ AC_CHECK_FUNCS([mkstemp mktemp])
 AC_CHECK_FUNCS([strerror perror])
 
 # optional system functions
-AC_CHECK_FUNCS([dup2 mlockall getcwd])
+AC_CHECK_FUNCS([dup2 mlockall getcwd setproctitle])
 
 # check for mmap support
 AC_CHECK_HEADERS([sys/mman.h], [AC_CHECK_FUNCS([mmap])])
@@ -196,7 +212,7 @@ AC_CHECK_HEADERS([sys/file.h])
 AC_CHECK_HEADERS([poll.h], [AC_CHECK_FUNCS([poll])])
 
 # optional I/O functions
-AC_CHECK_FUNCS([pread pwrite readv writev])
+AC_CHECK_FUNCS([pread pwrite readv writev posix_fadvise])
 
 # optional sleep function
 AC_CHECK_FUNCS([nanosleep])
@@ -246,10 +262,10 @@ AC_RUN_IFELSE(
 	[AC_LANG_PROGRAM([#include <inttypes.h>],[uint16_t x = __builtin_bswap16(0x1234)])],
 	[
 	AC_MSG_RESULT(yes)
-	AC_DEFINE_UNQUOTED([BSWAP16(x)], [__builtin_bswap16(x)], [bswap16])
+	AC_DEFINE([BSWAP16(x)], [__builtin_bswap16(x)], [bswap16])
 	],[
 	AC_MSG_RESULT(no)
-	AC_DEFINE_UNQUOTED([BSWAP16(x)], [((((x)<<8)&0xFF00) | (((x)>>8)&0xFF))], [bswap16])
+	AC_DEFINE([BSWAP16(x)], [((((x)<<8)&0xFF00) | (((x)>>8)&0xFF))], [bswap16])
 	])
 
 AC_MSG_CHECKING([for __builtin_bswap32])
@@ -257,10 +273,10 @@ AC_RUN_IFELSE(
 	[AC_LANG_PROGRAM([#include <inttypes.h>],[uint32_t x = __builtin_bswap32(0x12345678)])],
 	[
 	AC_MSG_RESULT(yes)
-	AC_DEFINE_UNQUOTED([BSWAP32(x)], [__builtin_bswap32(x)], [bswap32])
+	AC_DEFINE([BSWAP32(x)], [__builtin_bswap32(x)], [bswap32])
 	],[
 	AC_MSG_RESULT(no)
-	AC_DEFINE_UNQUOTED([BSWAP32(x)], [((((x)<<24)&0xFF000000) | (((x)<<8)&0xFF0000) | (((x)>>8)&0xFF00) | (((x)>>24)&0xFF))], [bswap32])
+	AC_DEFINE([BSWAP32(x)], [((((x)<<24)&0xFF000000) | (((x)<<8)&0xFF0000) | (((x)>>8)&0xFF00) | (((x)>>24)&0xFF))], [bswap32])
 	])
 
 AC_MSG_CHECKING([for __builtin_bswap64])
@@ -268,10 +284,10 @@ AC_RUN_IFELSE(
 	[AC_LANG_PROGRAM([#include <inttypes.h>],[uint64_t x = __builtin_bswap64(0x123456789ABCDEF0)])],
 	[
 	AC_MSG_RESULT(yes)
-	AC_DEFINE_UNQUOTED([BSWAP64(x)], [__builtin_bswap64(x)], [bswap64])
+	AC_DEFINE([BSWAP64(x)], [__builtin_bswap64(x)], [bswap64])
 	],[
 	AC_MSG_RESULT(no)
-	AC_DEFINE_UNQUOTED([BSWAP64(x)], [((((x)<<56)&0xFF00000000000000) | (((x)<<40)&0xFF000000000000) | (((x)<<24)&0xFF0000000000) | (((x)<<8)&0xFF00000000) | (((x)>>8)&0xFF000000) | (((x)>>24)&0xFF0000) | (((x)>>40)&0xFF00) | (((x)>>56)&0xFF))], [bswap64])
+	AC_DEFINE([BSWAP64(x)], [((((x)<<56)&0xFF00000000000000) | (((x)<<40)&0xFF000000000000) | (((x)<<24)&0xFF0000000000) | (((x)<<8)&0xFF00000000) | (((x)>>8)&0xFF000000) | (((x)>>24)&0xFF0000) | (((x)>>40)&0xFF00) | (((x)>>56)&0xFF))], [bswap64])
 	])
 
 
@@ -298,7 +314,7 @@ int main(void) {
 	}
 ]])],[ac_have_working_poll=yes],[ac_have_working_poll=no])
 if test "$ac_have_working_poll" = "no" ; then
-	AC_DEFINE_UNQUOTED(BROKEN_POLL, 1,[poll does not work properly on devices])
+	AC_DEFINE([BROKEN_POLL], [1],[poll does not work properly on devices])
 fi
 AC_MSG_RESULT($ac_have_working_poll)
 fi dnl poll() was found
@@ -309,7 +325,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>]],
 	       [[unsigned long long int foo, bar; bar = __sync_add_and_fetch(&foo, 1); bar = __sync_sub_and_fetch(&foo, 1); bar = __sync_or_and_fetch(&foo, 1); bar = __sync_and_and_fetch(&foo, 1); bar = __sync_xor_and_fetch(&foo, 1); ]])],
 	       [ac_have___sync_op_and_fetch=yes], [ac_have___sync_op_and_fetch=no])
 if test "$ac_have___sync_op_and_fetch" = "yes" ; then
-	AC_DEFINE_UNQUOTED(HAVE___SYNC_OP_AND_FETCH, 1, [have __sync_OP_and_fetch intrinsics])
+	AC_DEFINE([HAVE___SYNC_OP_AND_FETCH], [1], [have __sync_OP_and_fetch intrinsics])
 fi
 AC_MSG_RESULT($ac_have___sync_op_and_fetch)
 
@@ -319,10 +335,33 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>]],
 	       [[unsigned long long int foo, bar; bar = __sync_fetch_and_add(&foo, 1); bar = __sync_fetch_and_sub(&foo, 1); bar = __sync_fetch_and_or(&foo, 1); bar = __sync_fetch_and_and(&foo, 1); bar = __sync_fetch_and_xor(&foo, 1); ]])],
 	       [ac_have___sync_fetch_and_op=yes], [ac_have___sync_fetch_and_op=no])
 if test "$ac_have___sync_fetch_and_op" = "yes" ; then
-	AC_DEFINE_UNQUOTED(HAVE___SYNC_FETCH_AND_OP, 1, [have __sync_fetch_and_OP intrinsics])
+	AC_DEFINE([HAVE___SYNC_FETCH_AND_OP], [1], [have __sync_fetch_and_OP intrinsics])
 fi
 AC_MSG_RESULT($ac_have___sync_fetch_and_op)
 
+saved_cflags="$CFLAGS"
+CFLAGS="-Werror"
+AC_MSG_CHECKING([for __attribute__((fallthrough))])
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[]],[[
+int main(void) {
+	int a=0;
+	switch (a) {
+	case 1:
+		a=2;
+		__attribute__((fallthrough));
+	case 2:
+		a=1;
+	}
+	return a;
+}
+]])],[ac_have_working_attribute_fallthrough=yes],[ac_have_working_attribute_fallthrough=no])
+if test "$ac_have_working_attribute_fallthrough" = "yes" ; then
+	AC_DEFINE([nobreak],[__attribute__((fallthrough))],[have __attribute__((fallthrough))])
+else
+	AC_DEFINE([nobreak],[],[do not have __attribute__((fallthrough))])
+fi
+AC_MSG_RESULT($ac_have_working_attribute_fallthrough)
+CFLAGS="$saved_cflags"
 
 AC_CHECK_PROGS([KILL], [kill])
 PKG_PROG_PKG_CONFIG
@@ -348,6 +387,8 @@ AC_ARG_ENABLE([mfschunkserver],
 	[AS_HELP_STRING([--disable-mfschunkserver], [Do not build mfschunkserver])])
 AC_ARG_ENABLE([mfsmount],
 	[AS_HELP_STRING([--disable-mfsmount], [Do not build mfsmount])])
+AC_ARG_ENABLE([mfsbdev],
+	[AS_HELP_STRING([--disable-mfsbdev], [Do not build mfsbdev])])
 AC_ARG_ENABLE([mfscgi],
 	[AS_HELP_STRING([--disable-mfscgi], [Do not install CGI scripts])])
 AC_ARG_ENABLE([mfscli],
@@ -403,16 +444,31 @@ AM_CONDITIONAL([BUILD_CHUNKSERVER], [test "$enable_mfschunkserver" != "no"])
 
 
 pcap=no
-AC_SEARCH_LIBS([pcap_lib_version],[pcap],[ AC_CHECK_HEADERS([pcap.h],[pcap=yes]) ])
+AC_CHECK_LIB([pcap],[pcap_lib_version],[ AC_CHECK_HEADERS([pcap.h],[pcap=yes]) ])
 
-if test "$pcap" != "yes" -a "enable_mfsnetdump" != "no"; then
-	echo "****** mfsnetdump disabled ******"
-	echo "* mfsnetdump needs pcap library *"
-	echo "*********************************"
-	enable_mfsnetdump=no
+if test "$pcap" = "no"; then
+	PCAP_LIBS=
+	if test "enable_mfsnetdump" != "no"; then
+		echo "****** mfsnetdump disabled ******"
+		echo "* mfsnetdump needs pcap library *"
+		echo "*********************************"
+		enable_mfsnetdump=no
+	fi
+else
+	PCAP_LIBS=-lpcap
+	# check for new PCAP pcap_findalldevs
+	AC_CHECK_LIB([pcap], [pcap_findalldevs], [AC_DEFINE([HAVE_PCAP_FINDALLDEVS],[1],[libpcap has function pcap_findalldevs])])
+
 fi
+AC_SUBST([PCAP_LIBS])
 
 AM_CONDITIONAL([BUILD_NETDUMP], [test "$enable_mfsnetdump" != "no"])
+
+if test "$bdev" != "no" -a "enable_mfsbdev" != "no"; then
+	AC_CHECK_HEADERS([linux/nbd.h linux/fs.h],,[bdev=no])
+fi
+
+AM_CONDITIONAL([WITH_BDEV], [test "$bdev" != "no" -a "$enable_mfsbdev" != "no"])
 
 if test "$fuse" != "no" -a "enable_mfsmount" != "no"; then
 	if test -n "$PKG_CONFIG"; then
@@ -457,9 +513,11 @@ if test "$fuse" != "no" ; then
 	esac
 fi
 
-AC_CHECK_LIB(fuse, fuse_version, [AC_DEFINE([HAVE_FUSE_VERSION],[1],[libfuse has function fuse_version])])
+AC_CHECK_LIB([fuse], [fuse_version], [AC_DEFINE([HAVE_FUSE_VERSION],[1],[libfuse has function fuse_version])])
 
-AM_CONDITIONAL([BUILD_MOUNT], [test "$fuse" != "no" -a "$enable_mfsmount" != "no"])
+AM_CONDITIONAL([WITH_MOUNT], [test "$fuse" != "no" -a "$enable_mfsmount" != "no"])
+
+AM_CONDITIONAL([BUILD_CLIENT], [test \( "$fuse" != "no" -a "$enable_mfsmount" != "no" \) -o \( "$bdev" != "no" -a "$enable_mfsbdev" != "no" \)])
 
 AM_CONDITIONAL([CREATE_ETC_MFS], [test "$enable_mfsmaster" != "no" -o "$enable_mfsmetalogger" != "no" -o "$enable_mfschunkserver" != "no" -o "$enable_mfsmount" != "no"])
 AM_CONDITIONAL([CREATE_DATA_DIR], [test "$enable_mfsmaster" != "no" -o "$enable_mfsmetalogger" != "no" -o "$enable_mfschunkserver" != "no" -o "$enable_mfscgiserv" != "no"])
@@ -563,10 +621,10 @@ AC_CONFIG_FILES([Makefile
 		mfsscripts/Makefile
 		mfsdata/Makefile
 		mfsmaster/Makefile
-		mfsmetadump/Makefile
+		mfsmetatools/Makefile
 		mfsmetalogger/Makefile
 		mfssupervisor/Makefile
-		mfsmount/Makefile
+		mfsclient/Makefile
 		mfsnetdump/Makefile
 		mfstests/Makefile
 		systemd/Makefile
@@ -580,7 +638,10 @@ AC_CONFIG_FILES([Makefile
 		mfsdata/mfsmount.cfg
 		systemd/moosefs-cgiserv.service
 		systemd/moosefs-chunkserver.service
+		systemd/moosefs-chunkserver@.service
 		systemd/moosefs-master.service
+		systemd/moosefs-master@.service
 		systemd/moosefs-metalogger.service
+		systemd/moosefs-metalogger@.service
 ])
 AC_OUTPUT

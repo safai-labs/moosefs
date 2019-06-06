@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -241,7 +241,11 @@ static inline int matoclserv_fuse_write_chunk_common(matoclserventry *eptr,uint3
 	uint8_t cs_data[100*14];
 
 	if (sessions_get_sesflags(eptr->sesdata)&SESFLAG_READONLY) {
-		status = MFS_ERROR_EROFS;
+		if (eptr->version>=VERSION2INT(3,0,101)) {
+			status = MFS_ERROR_EROFS;
+		} else {
+			status = MFS_ERROR_IO;
+		}
 	} else {
 		status = fs_writechunk(inode,indx,chunkopflags,&prevchunkid,&chunkid,&fleng,&opflag);
 	}
@@ -1092,7 +1096,7 @@ void matoclserv_node_info(matoclserventry *eptr,const uint8_t *data,uint32_t len
 }
 
 void matoclserv_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
-	uint64_t totalspace,availspace,trspace,respace;
+	uint64_t totalspace,availspace,freespace,trspace,respace;
 	uint64_t memusage,syscpu,usercpu;
 	uint32_t trnodes,renodes,inodes,dnodes,fnodes;
 	uint32_t chunks,chunkcopies,tdcopies;
@@ -1106,10 +1110,10 @@ void matoclserv_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) 
 		return;
 	}
 	meta_info(&lsstore,&lstime,&lsstat);
-	fs_info(&totalspace,&availspace,&trspace,&trnodes,&respace,&renodes,&inodes,&dnodes,&fnodes);
+	fs_info(&totalspace,&availspace,&freespace,&trspace,&trnodes,&respace,&renodes,&inodes,&dnodes,&fnodes);
 	chunk_info(&chunks,&chunkcopies,&tdcopies);
 	chartsdata_resusage(&memusage,&syscpu,&usercpu);
-	ptr = matoclserv_createpacket(eptr,MATOCL_INFO,129);
+	ptr = matoclserv_createpacket(eptr,MATOCL_INFO,137);
 	/* put32bit(&buff,VERSION): */
 	put16bit(&ptr,VERSMAJ);
 	put8bit(&ptr,VERSMID);
@@ -1119,6 +1123,7 @@ void matoclserv_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) 
 	put64bit(&ptr,usercpu);
 	put64bit(&ptr,totalspace);
 	put64bit(&ptr,availspace);
+	put64bit(&ptr,freespace);
 	put64bit(&ptr,trspace);
 	put32bit(&ptr,trnodes);
 	put64bit(&ptr,respace);
@@ -1667,38 +1672,12 @@ void matoclserv_fuse_register(matoclserventry *eptr,const uint8_t *data,uint32_t
 
 void matoclserv_reload_sessions(void) {
 	matoclserventry *eptr;
-	uint8_t status;
 
 	exports_reload();
 	for (eptr=matoclservhead ; eptr ; eptr=eptr->next) {
 		if (eptr->mode==DATA && eptr->registered==1 && eptr->sesdata!=NULL) {
 			if (sessions_get_exportscsum(eptr->sesdata)!=exports_checksum()) {
-				uint32_t rootinode;
-				uint8_t sesflags;
-				uint16_t umaskval;
-				uint8_t mingoal,maxgoal;
-				uint32_t mintrashtime,maxtrashtime;
-				uint32_t rootuid,rootgid;
-				uint32_t mapalluid,mapallgid;
-
-				if (eptr->usepassword) {
-					status = exports_check(eptr->peerip,eptr->version,eptr->path,eptr->passwordrnd,eptr->passwordmd5,&sesflags,&umaskval,&rootuid,&rootgid,&mapalluid,&mapallgid,&mingoal,&maxgoal,&mintrashtime,&maxtrashtime);
-				} else {
-					status = exports_check(eptr->peerip,eptr->version,eptr->path,NULL,NULL,&sesflags,&umaskval,&rootuid,&rootgid,&mapalluid,&mapallgid,&mingoal,&maxgoal,&mintrashtime,&maxtrashtime);
-				}
-				if (status==MFS_STATUS_OK) {
-					if (eptr->path) {
-						status = fs_getrootinode(&rootinode,eptr->path);
-					} else {
-						rootinode = 0;
-					}
-				}
-				if (status!=MFS_STATUS_OK) {
-					syslog(LOG_NOTICE,"(client connection from ip:%u.%u.%u.%u): can't find matching line in 'exports' file after reload (error:%s)",(eptr->peerip>>24)&0xFF,(eptr->peerip>>16)&0xFF,(eptr->peerip>>8)&0xFF,eptr->peerip&0xFF,mfsstrerr(status));
-					eptr->mode = KILL;
-				} else {
-					sessions_chg_session(eptr->sesdata,exports_checksum(),rootinode,sesflags,umaskval,rootuid,rootgid,mapalluid,mapallgid,mingoal,maxgoal,mintrashtime,maxtrashtime,eptr->peerip,eptr->info,eptr->ileng);
-				}
+				eptr->mode = KILL;
 			}
 		}
 	}
@@ -1850,20 +1829,25 @@ uint32_t* matoclserv_gid_storage(uint32_t gids) {
 }
 
 void matoclserv_fuse_statfs(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
-	uint64_t totalspace,availspace,trashspace,sustainedspace;
+	uint64_t totalspace,availspace,freespace,trashspace,sustainedspace;
 	uint32_t msgid,inodes;
+	uint8_t addfreespace;
 	uint8_t *ptr;
 	if (length!=4) {
 		syslog(LOG_NOTICE,"CLTOMA_FUSE_STATFS - wrong size (%"PRIu32"/4)",length);
 		eptr->mode = KILL;
 		return;
 	}
+	addfreespace = ((eptr->version>=VERSION2INT(3,0,102) && eptr->version<VERSION2INT(4,0,0)) || eptr->version>=VERSION2INT(4,9,0))?1:0;
 	msgid = get32bit(&data);
-	fs_statfs(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),&totalspace,&availspace,&trashspace,&sustainedspace,&inodes);
-	ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_STATFS,40);
+	fs_statfs(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),&totalspace,&availspace,&freespace,&trashspace,&sustainedspace,&inodes);
+	ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_STATFS,addfreespace?48:40);
 	put32bit(&ptr,msgid);
 	put64bit(&ptr,totalspace);
 	put64bit(&ptr,availspace);
+	if (addfreespace) {
+		put64bit(&ptr,freespace);
+	}
 	put64bit(&ptr,trashspace);
 	put64bit(&ptr,sustainedspace);
 	put32bit(&ptr,inodes);
@@ -2002,6 +1986,9 @@ void matoclserv_fuse_lookup(matoclserventry *eptr,const uint8_t *data,uint32_t l
 						lflags |= LOOKUP_CHUNK_ZERO_DATA;
 					}
 				}
+			}
+			if (sesflags&SESFLAG_READONLY) {
+				lflags |= LOOKUP_RO_FILESYSTEM;
 			}
 			if (lflags & LOOKUP_CHUNK_ZERO_DATA) {
 				ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_LOOKUP,eptr->asize+23+count*14);
@@ -3016,7 +3003,11 @@ void matoclserv_fuse_write_chunk_end(matoclserventry *eptr,const uint8_t *data,u
 	}
 	flenghaschanged = 0;
 	if (sessions_get_sesflags(eptr->sesdata)&SESFLAG_READONLY) {
-		status = MFS_ERROR_EROFS;
+		if (eptr->version>=VERSION2INT(3,0,101)) {
+			status = MFS_ERROR_EROFS;
+		} else {
+			status = MFS_ERROR_IO;
+		}
 	} else {
 		status = fs_writeend(inode,fleng,chunkid,chunkopflags,&flenghaschanged);
 	}
@@ -3062,6 +3053,17 @@ void matoclserv_fuse_fleng_has_changed(matoclserventry *eptr,uint32_t inode,uint
 				put32bit(&ptr,inode);
 				put64bit(&ptr,fleng);
 			}
+		}
+	}
+}
+
+void matoclserv_fuse_invalidate_chunk_cache(void) {
+	matoclserventry *xeptr;
+	uint8_t *ptr;
+	for (xeptr=matoclservhead ; xeptr ; xeptr=xeptr->next) {
+		if (xeptr->mode==DATA && xeptr->registered==1 && xeptr->sesdata!=NULL && (xeptr->version>=VERSION2INT(4,3,0) || (xeptr->version>=VERSION2INT(3,0,100) && xeptr->version<VERSION2INT(4,0,0)))) {
+			ptr = matoclserv_createpacket(xeptr,MATOCL_FUSE_INVALIDATE_CHUNK_CACHE,4);
+			put32bit(&ptr,0);
 		}
 	}
 }
@@ -5295,7 +5297,7 @@ void matoclserv_read(matoclserventry *eptr,double now) {
 			leng = get32bit(&ptr);
 
 			if (leng>MaxPacketSize) {
-				syslog(LOG_WARNING,"main master server module: packet too long (%"PRIu32"/%u)",leng,MaxPacketSize);
+				syslog(LOG_WARNING,"main master server module: packet too long (%"PRIu32"/%u) ; command:%"PRIu32,leng,MaxPacketSize,type);
 				eptr->input_end = 1;
 				return;
 			}
@@ -5622,6 +5624,12 @@ void matoclserv_keep_alive(void) {
 		if (eptr->mode == DATA && eptr->outputhead) {
 			matoclserv_write(eptr,now);
 		}
+	}
+}
+
+void matoclserv_close_lsock(void) { // after fork
+	if (lsock>=0) {
+		close(lsock);
 	}
 }
 

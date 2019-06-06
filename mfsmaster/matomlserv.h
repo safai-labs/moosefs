@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -33,6 +33,7 @@ void matomlserv_broadcast_logrotate();
 int matomlserv_no_more_pending_jobs(void);
 void matomlserv_disconnect_all(void);
 uint16_t matomlserv_getport(void);
+void matomlserv_close_lsock(void);
 int matomlserv_init(void);
 
 #endif

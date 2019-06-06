@@ -1,4 +1,4 @@
-.TH mfsmaster.cfg "5" "August 2017" "MooseFS 3.0.97-1" "This is part of MooseFS"
+.TH mfsmaster.cfg "5" "May 2019" "MooseFS 3.0.105-1" "This is part of MooseFS"
 .SH NAME
 mfsmaster.cfg \- main configuration file for \fBmfsmaster\fP
 .SH DESCRIPTION
@@ -58,6 +58,9 @@ how often (in hours) master will store metadata (default is 1)
 .B METADATA_DOWNLOAD_FREQ
 how often (in hours) leader will download metadata from followers (pro version only ; default is 24)
 .TP
+.B METADATA_DOWNLOAD_LIMIT
+metadata downloading limit in mebibytes per second (pro version only ; 0 means no limit, default is 50 - 50MiB/s = ~52.4MB/s)
+.TP
 .B BACK_META_KEEP_PREVIOUS
 number of previous metadata files to be kept (default is 1)
 .TP
@@ -65,6 +68,15 @@ number of previous metadata files to be kept (default is 1)
 how many seconds of change logs have to be preserved in memory (default is 1800; 
 this sets the minimum, actual number may be a bit bigger due to logs being kept 
 in 5k blocks; zero disables extra logs storage)
+.TP
+.B CHANGELOG_SAVE_MODE
+Changelog save mode (default is 0)
+.br
+0 - write in background by different process (less safe, but doesn't make master stop in case of heavy hdd load)
+.br
+1 - write in foreground without syncing data (master waits for every changelog to be saved to hdd, but without syncing - a little more safe than the background option, but may cause master to stop and wait for flushing hdd buffers)
+.br
+2 - write in foreground with fsync after each write (very safe, but may make your master very slow unless you have very sophisticated hardware)
 .TP
 .B MISSING_LOG_CAPACITY
 how many missing chunks will be stored in master (up to 100*MISSING_LOG_CAPACITY bytes of memory will be allocated ; default value is 100000)
@@ -103,7 +115,25 @@ Optional authentication string. When defined - then only chunkservers with the s
 Optional IP class remapping. Remap chunkserver IP addresses with first REMAP_BITS of IP equal to first REMAP_BITS of REMAP_SOURCE_IP_CLASS. During remapping system will set first REMAP_BITS of IP address to first REMAP_BITS of REMAP_DESTINATION_IP_CLASS. (defaults are zeros which means no remap)
 .TP
 .B REPLICATIONS_DELAY_INIT
-initial delay in seconds before starting replications (default is 300)
+initial delay in seconds before starting replications (default is 60)
+.TP
+.B REPLICATIONS_RESPECT_TOPOLOGY
+whether to make undergoal replications respect topology (default is 0)
+.br
+0 - do not respect topology
+.br
+1 - pick destination server at random, but then choose best source server
+.br
+2 - try to find destination server in the same rack as one of the existing copies and then replicate chunk locally (in the same rack)
+.TP
+.B CHUNKS_UNIQUE_MODE
+avoid using same ip/rack for different chunk copies (default is 0)
+.br
+0 - ignore ip and rackid (standard behaviour)
+.br
+1 - avoid storing more than one copy on chunkservers using same IP number
+.br
+2 - avoid storing more than one copy on chunkservers using IP number from the same rack id
 .TP
 .B CHUNKS_LOOP_MAX_CPS
 Chunks loop shouldn't check more chunks per seconds than given number (default is 100000)
@@ -124,10 +154,10 @@ Maximum number of chunks to replicate to one chunkserver (default is 2,1,1,4 - s
 Maximum number of chunks to replicate from one chunkserver (default is 10,5,2,5 - see NOTES)
 .TP
 .B CS_HEAVY_LOAD_THRESHOLD
-Threshold for chunkserver load. (default is 100 - see NOTES)
+Threshold for chunkserver load. (default is 150 - see NOTES)
 .TP
 .B CS_HEAVY_LOAD_RATIO_THRESHOLD
-Threshold ratio for chunkserver load (default is 5.0 - see NOTES)
+Threshold ratio for chunkserver load (default is 3.0 - see NOTES)
 .TP
 .B CS_HEAVY_LOAD_GRACE_PERIOD
 Defines how long chunkservers will remain in 'grace' mode (default is 900 - see NOTES)
@@ -164,6 +194,9 @@ Default grace period in seconds for soft quota (default is 604800 = 7 days)
 .TP
 .B ATIME_MODE
 Set atime modification mode (default is 0 = always modify atime - see NOTES)
+.TP
+.B RESERVE_SPACE
+Set amount of space reserved for superuser (default is 0 = do not reserve space for superuser - see NOTES)
 .SH NOTES
 .PP
 Chunks in master are tested in a loop. Speed (or frequency) is regulated by two
@@ -200,21 +233,31 @@ Whenever chunkserver load is higher than \fBCS_HEAVY_LOAD_THRESHOLD\fP  and \fBC
 .PP
 There are five values for \fBATIME_MODE\fP (all other values are treated as 0):
 .IP \[bu] 2
-0 = Always modify atime for files, folders and symlinks.
+\fB0\fP = Always modify atime for files, folders and symlinks.
 .IP \[bu] 2
-1 = Always modify atime but only in case of files (do not modify atime in case of folders and symlinks).
+\fB1\fP = Always modify atime but only in case of files (do not modify atime in case of folders and symlinks).
 .IP \[bu] 2
-2 = Modify atime only when it is lower than ctime or mtime and when current time is higher than ctime or mtime respectively, also modify atime when current atime is older than 24h. Do it for all objects during access (like "relatime" option in Linux).
+\fB2\fP = Modify atime only when it is lower than ctime or mtime and when current time is higher than ctime or mtime respectively, also modify atime when current atime is older than 24h. Do it for all objects during access (like "relatime" option in Linux).
 .IP \[bu] 2
-3 = Same as above but only in case of files. In case of folders and symlinks do not modify atime.
+\fB3\fP = Same as above but only in case of files. In case of folders and symlinks do not modify atime.
 .IP \[bu] 2
-4 = Never modify atime during access (like "noatime" option).
+\fB4\fP = Never modify atime during access (like "noatime" option).
+.PP
+You can reserve space for superuser using \fBRESERVE_SPACE\fP option. You can define it as number of bytes, percent of total space, capacity of biggest chunkserver, etc.
+.IP \[bu] 2
+\fI#\fP or \fI#\fP\fBB\fP = number of bytes reserved for superuser. Standard metric prefixes can be used - SI and IEC (k,K,M,Mi,G,Gi etc.)
+.IP \[bu] 2
+\fI#\fP\fB%\fP or \fI#\fP\fB.\fP\fI#\fP\fB%\fP = percent of total capacity of MooseFS instance
+.IP \[bu] 2
+\fI#\fP\fBU\fP or \fI#\fP\fB.\fP\fI#\fP\fBU\fP = multiplies of "U" value; U is defined as maximum number of bytes currently used by a single chunkserver
+.IP \[bu] 2
+\fI#\fP\fBC\fP or \fI#\fP\fB.\fP\fI#\fP\fBC\fP = multiplies of "C" value; C is defined as maximum total capacity of a single chunkserver
 .PP
 When your network has two (or more) IP classes you may want to use one network for standard communication between MFS modules and separate network only for I/O. It can be done by setting REMAP_BITS, REMAP_SOURCE_IP_CLASS and REMAP_DESTINATION_IP_CLASS.
 When you set these options then master will change internally IP addresses of chunkservers and will send them as chunk locations, so clients will make connections with chunkservers using new (destination) IP for all I/O, but still communicate with master using original (source) IP.
 Also chunkservers will use original IP to communicate with master, but they will use new IP's to communicate between themselves during replication. Beware that all clients and chunkservers must have access to both networks, but masters, metaloggers etc. will need only access to the source network.
 .SH COPYRIGHT
-Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 
 This file is part of MooseFS.
 

@@ -1,4 +1,4 @@
-.TH mfschunkserver.cfg "5" "August 2017" "MooseFS 3.0.97-1" "This is part of MooseFS"
+.TH mfschunkserver.cfg "5" "May 2019" "MooseFS 3.0.105-1" "This is part of MooseFS"
 .SH NAME
 mfschunkserver.cfg \- main configuration file for \fBmfschunkserver\fP
 .SH DESCRIPTION
@@ -45,7 +45,18 @@ where to store daemon lock file
 alternate location/name of \fBmfshdd.cfg\fP file
 .TP
 .B HDD_TEST_FREQ
-chunk test period in seconds; default is 10
+This option is deprecated. Please define \fBHDD_TEST_SPEED\fP instead. If \fBHDD_TEST_SPEED\fP is not defined then system will try to use \fBHDD_TEST_FREQ\fP but will convert it to \fBHDD_TEST_SPEED\fP using formula:
+\fBHDD_TEST_SPEED = 10 / HDD_TEST_FREQ\fP
+.TP
+.B HDD_TEST_SPEED
+Speed of background chunk tests in MB/s per disk (formally entry defined in \fBmfshdd.cfg\fP). Value can be given as a decimal number; default is 1.0
+.TP
+.B HDD_MIN_TEST_INTERVAL
+prevents from testing chunk integrity when last I/O (including test) was performed less than HDD_MIN_TEST_INTERVAL seconds ago; default is 86400
+.TP
+.B HDD_FADVISE_MIN_TIME
+If possible use posix_fadvise(POSIX_DONTNEED) after each chunk test (but only if last I/O operation was performed more than HDD_FADVISE_MIN_TIME seconds ago). Using zero will always perform posix_fadvise (flush cache) and using negative value will never flush cache after tests. This setting is valid only for system
+s that support posix_fadivise; default value is 86400
 .TP
 .B HDD_LEAVE_SPACE_DEFAULT
 how much space should be left unused on each hard drive; 
@@ -54,6 +65,9 @@ examples: 0.5GB, .5G, 2.56GiB, 1256M etc.
 .TP
 .B HDD_REBALANCE_UTILIZATION
 percent of total work time the chunkserver is allowed to spend on hdd space rebalancing; default is 20
+.TP
+.B HDD_HIGH_SPEED_REBALANCE_LIMIT
+maximum simultaneous writes in high speed disk rebalance (0 means use standard rebalance; default is 0)
 .TP
 .BR HDD_ERROR_TOLERANCE_COUNT ", " HDD_ERROR_TOLERANCE_PERIOD
 how many i/o errors (COUNT) to tolerate in given amount of seconds (PERIOD) on a single hard drive; if the number of errors exceeds this setting, the offending hard drive will be marked as damaged; defaults are 2 and 600
@@ -65,7 +79,7 @@ enables/disables fsync before chunk closing; default is 0 (off)
 enables/disables sparsification (skip leading and trailing zeroz) during writing new block; default is 1 (on)
 .TP
 .BR WORKERS_MAX ", " WORKERS_MAX_IDLE
-maximum number of active workers and maximum number of idle workers; defaults are 150 and 40
+maximum number of active workers and maximum number of idle workers; defaults are 250 and 40
 .TP
 .B LABELS
 labels string; default is empty - no labels
@@ -83,7 +97,7 @@ MooseFS master command port; default is 9420
 MooseFS master control port; default is 9419
 .TP
 .B MASTER_TIMEOUT
-timeout in seconds for master connections; default is 60
+timeout in seconds for master connections (if not 0); If this value is zero then chunkserver sets it initially to 10 and asks master for this value. default is 0 (ask master).
 .TP
 .B MASTER_RECONNECTION_DELAY
 delay in seconds before trying to reconnect to master after disconnection (default is 5)
@@ -99,11 +113,8 @@ IP address to listen on for client (mount) connections (\fB*\fP means any)
 .TP
 .B CSSERV_LISTEN_PORT
 port to listen on for client (mount) connections (default is 9422)
-.TP
-.B CSSERV_TIMEOUT
-timeout (in seconds) for client (mount) connections (default is 5)
 .SH COPYRIGHT
-Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 
 This file is part of MooseFS.
 

@@ -20,7 +20,7 @@
 
 Summary:	MooseFS - distributed, fault tolerant file system
 Name:		moosefs
-Version:	3.0.97
+Version:	3.0.105
 Release:	1%{?_relname}
 License:	commercial
 Group:		System Environment/Daemons
@@ -152,6 +152,14 @@ rm -rf $RPM_BUILD_ROOT
 make install \
 	DESTDIR=$RPM_BUILD_ROOT
 
+EXTRA_FILES=$RPM_BUILD_ROOT/ExtraFiles.list
+touch %{EXTRA_FILES}
+
+if [ -x %{buildroot}/%{_sbindir}/mfsbdev ]; then
+	echo '%attr(755,root,root) %{_sbindir}/mfsbdev' > %{EXTRA_FILES}
+	echo '%{_mandir}/man8/mfsbdev.8*' >> %{EXTRA_FILES}
+fi
+
 %if "%{distro}" == "rhsysv"
 install -d $RPM_BUILD_ROOT%{_initrddir}
 for f in rpm/rh/*.init ; do
@@ -274,6 +282,7 @@ exit 0
 %doc NEWS README
 %attr(755,root,root) %{_sbindir}/mfsmaster
 %attr(755,root,root) %{_sbindir}/mfsmetadump
+%attr(755,root,root) %{_sbindir}/mfsmetadirinfo
 %attr(755,root,root) %{_sbindir}/mfsmetarestore
 %attr(755,root,root) %{_sbindir}/mfsstatsdump
 %{_mandir}/man5/mfsexports.cfg.5*
@@ -282,6 +291,7 @@ exit 0
 %{_mandir}/man8/mfsmaster.8*
 %{_mandir}/man8/mfsmetarestore.8*
 %{_mandir}/man8/mfsmetadump.8*
+%{_mandir}/man8/mfsmetadirinfo.8*
 %{_mandir}/man8/mfsstatsdump.8*
 %{mfsconfdir}/mfsexports.cfg.sample
 %{mfsconfdir}/mfstopology.cfg.sample
@@ -293,6 +303,7 @@ exit 0
 %endif
 %if %{_with_systemd}
 %{systemdunitdir}/moosefs-master.service
+%{systemdunitdir}/moosefs-master@.service
 %endif
 
 
@@ -311,6 +322,7 @@ exit 0
 %endif
 %if %{_with_systemd}
 %{systemdunitdir}/moosefs-metalogger.service
+%{systemdunitdir}/moosefs-metalogger@.service
 %endif
 
 
@@ -335,12 +347,13 @@ exit 0
 %endif
 %if %{_with_systemd}
 %{systemdunitdir}/moosefs-chunkserver.service
+%{systemdunitdir}/moosefs-chunkserver@.service
 %endif
 
 
 
 
-%files client
+%files client -f %{EXTRA_FILES}
 %defattr(644,root,root,755)
 %doc NEWS README
 %{_bindir}/mfsappendchunks
@@ -380,7 +393,14 @@ exit 0
 %{_bindir}/mfsscadmin
 %attr(755,root,root) %{_bindir}/mfstools
 %attr(755,root,root) %{_bindir}/mfsmount
+# %attr(755,root,root) %{_sbindir}/mfsbdev - moved to EXTRA_FILES
 /sbin/mount.moosefs
+%{_includedir}/mfsio.h
+%{_libdir}/libmfsio.a
+%{_libdir}/libmfsio.la
+%{_libdir}/libmfsio.so
+%{_libdir}/libmfsio.so.1
+%{_libdir}/libmfsio.so.1.0.0
 %{_mandir}/man1/mfsappendchunks.1*
 %{_mandir}/man1/mfscheckfile.1*
 %{_mandir}/man1/mfsdirinfo.1*
@@ -426,6 +446,7 @@ exit 0
 %{_mandir}/man1/mfsscadmin.1*
 %{_mandir}/man1/mfstools.1*
 %{_mandir}/man8/mfsmount.8*
+# %{_mandir}/man8/mfsbdev.8* - moved to EXTRA_FILES
 %{_mandir}/man8/mount.moosefs.8*
 %{mfsconfdir}/mfsmount.cfg.sample
 

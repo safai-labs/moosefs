@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -63,6 +63,10 @@
 #include "merger.h"
 #include "changelog.h"
 #include "clocks.h"
+#include "matoclserv.h"
+#include "matocsserv.h"
+#include "matomlserv.h"
+#include "processname.h"
 
 #include "cfg.h"
 #include "main.h"
@@ -128,13 +132,24 @@ int meta_store_chunk(bio *fd,uint8_t (*storefn)(bio *),const char chunkname[4]) 
 	return 0;
 }
 
-void meta_store(bio *fd) {
+void meta_store(bio *fd,const char *crcfname) {
+	bio *crcfd;
 	uint8_t hdr[16];
 	uint8_t *ptr;
-//	off_t offbegin,offend;
-//	uint32_t maxnodeid;
 
-//	maxnodeid = fs_get_maxnodeid();
+#define STORE_CRC(section) if (crcfd!=NULL) { \
+		ptr = hdr; \
+		memcpy(ptr,section,4); \
+		ptr += 4; \
+		put32bit(&ptr,bio_crc(fd)); \
+		bio_write(crcfd,hdr,8); \
+	}
+
+	if (crcfname!=NULL) {
+		crcfd = bio_file_open(crcfname,BIO_WRITE,1024);
+	} else {
+		crcfd = NULL;
+	}
 
 	ptr = hdr;
 	put64bit(&ptr,metaversion);
@@ -143,48 +158,65 @@ void meta_store(bio *fd) {
 		syslog(LOG_NOTICE,"write error");
 		return;
 	}
-
+	STORE_CRC("HEAD")
 	if (meta_store_chunk(fd,sessions_store,"SESS")<0) { // (metadump!!!)
 		return;
 	}
+	STORE_CRC("SESS")
 	if (meta_store_chunk(fd,sclass_store,"SCLA")<0) { // needs to be before NODE (refcnt)
 		return;
 	}
+	STORE_CRC("SCLA")
 	if (meta_store_chunk(fd,fs_storenodes,"NODE")<0) {
 		return;
 	}
+	STORE_CRC("NODE")
 	if (meta_store_chunk(fd,fs_storeedges,"EDGE")<0) {
 		return;
 	}
+	STORE_CRC("EDGE")
 	if (meta_store_chunk(fd,fs_storefree,"FREE")<0) {
 		return;
 	}
+	STORE_CRC("FREE")
 	if (meta_store_chunk(fd,fs_storequota,"QUOT")<0) {
 		return;
 	}
+	STORE_CRC("QUOT")
 	if (meta_store_chunk(fd,xattr_store,"XATR")<0) { // dependency: NODE (fsnodes<->xattr)
 		return;
 	}
+	STORE_CRC("XATR")
 	if (meta_store_chunk(fd,posix_acl_store,"PACL")<0) { // dependency: NODE (fsnodes<->posix_acl))
 		return;
 	}
+	STORE_CRC("PACL")
 	if (meta_store_chunk(fd,of_store,"OPEN")<0) {
 		return;
 	}
+	STORE_CRC("OPEN")
 	if (meta_store_chunk(fd,flock_store,"FLCK")<0) { // dependency: OPEN
 		return;
 	}
+	STORE_CRC("FLCK")
 	if (meta_store_chunk(fd,posix_lock_store,"PLCK")<0) { // dependency: OPEN
 		return;
 	}
+	STORE_CRC("PLCK")
 	if (meta_store_chunk(fd,csdb_store,"CSDB")<0) {
 		return;
 	}
+	STORE_CRC("CSDB")
 	if (meta_store_chunk(fd,chunk_store,"CHNK")<0) {
 		return;
 	}
+	STORE_CRC("CHNK")
 	if (meta_store_chunk(fd,NULL,NULL)<0) {
 		return;
+	}
+	STORE_CRC("TAIL")
+	if (crcfd!=NULL) {
+		bio_close(crcfd);
 	}
 }
 
@@ -529,12 +561,13 @@ int meta_file_storeall(const char *fname) {
 	if (bio_write(fd,MFSSIGNATURE "M 2.0",8)!=(size_t)8) {
 		syslog(LOG_NOTICE,"write error");
 	} else {
-		meta_store(fd);
+		meta_store(fd,NULL);
 	}
 	if (bio_error(fd)!=0) {
 		bio_close(fd);
 		return -1;
 	}
+	syslog(LOG_NOTICE,"metadata file stored in emergency mode, file name: %s",fname);
 	bio_close(fd);
 	return 0;
 }
@@ -668,7 +701,16 @@ int meta_storeall(int bg) {
 		}
 		i = fork();
 		if (i<0) {
+#if defined(__linux__)
+			mfs_errlog(LOG_WARNING,"fork error (store data in foreground - it will block master for a while - check /proc/sys/vm/overcommit_memory and if necessary set to 1)");
+#else
 			mfs_errlog(LOG_WARNING,"fork error (store data in foreground - it will block master for a while)");
+#endif
+		} else if (i==0) { // child
+			matocsserv_close_lsock();
+			matoclserv_close_lsock();
+			matomlserv_close_lsock();
+			processname_set("mfsmaster (metadata saver)");
 		}
 	} else {
 		i = -1;
@@ -721,7 +763,7 @@ int meta_storeall(int bg) {
 		if (bio_write(fd,MFSSIGNATURE "M 2.0",8)!=(size_t)8) {
 			syslog(LOG_NOTICE,"write error");
 		} else {
-			meta_store(fd);
+			meta_store(fd,"metadata.crc");
 		}
 		if (bio_error(fd)!=0) {
 			syslog(LOG_ERR,"can't write metadata");
@@ -859,10 +901,16 @@ void meta_sendall(int socket) {
 		if (bio_write(fd,MFSSIGNATURE "M 2.0",8)!=(size_t)8) {
 			syslog(LOG_NOTICE,"write error");
 		} else {
-			meta_store(fd);
+			meta_store(fd,NULL);
 		}
 		bio_close(fd);
 		exit(0);
+	} else if (i<0) {
+#if defined(__linux__)
+		mfs_errlog(LOG_WARNING,"fork error - can't send metadata - check /proc/sys/vm/overcommit_memory and if necessary set to 1");
+#else
+		mfs_errlog(LOG_WARNING,"fork error - can't send metadata");
+#endif
 //	} else {
 //		main_chld_register(i,meta_sendended);
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -34,6 +34,8 @@ void changelog(const char *format,...) __printflike(1, 2);
 #else
 void changelog(const char *format,...);
 #endif
+
+char* changelog_generate_gids(uint32_t gids,uint32_t *gid);
 char* changelog_escape_name(uint32_t nleng,const uint8_t *name);
 int changelog_init(void);
 

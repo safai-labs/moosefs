@@ -24,6 +24,7 @@ mfschunkserver_SOURCES= \
 	chartsdefs.h \
 	init.h \
 	../mfscommon/main.c ../mfscommon/main.h \
+	../mfscommon/processname.c ../mfscommon/processname.h \
 	../mfscommon/cfg.c ../mfscommon/cfg.h \
 	../mfscommon/md5.c ../mfscommon/md5.h \
 	../mfscommon/random.c ../mfscommon/random.h \
@@ -40,12 +41,13 @@ mfschunkserver_SOURCES= \
 	../mfscommon/datapack.h ../mfscommon/massert.h \
 	../mfscommon/slogger.h ../mfscommon/mfsstrerr.h \
 	../mfscommon/portable.h ../mfscommon/mfsalloc.h \
+	../mfscommon/sizestr.h \
 	../mfscommon/MFSCommunication.h
 
 
 mfschunkserver_CFLAGS=$(PTHREAD_CFLAGS)
 mfschunkserver_CPPFLAGS=$(AM_CPPFLAGS) -DMFSMAXFILES=16384 -D_USE_PTHREADS $(PTHREAD_CPPFLAGS) -DAPPNAME=mfschunkserver -DUSE_CONNCACHE
-mfschunkserver_LDFLAGS=$(PTHREAD_LIBS) $(ZLIB_LIBS)
+mfschunkserver_LDFLAGS=$(PTHREAD_LIBS) $(ZLIB_LIBS) $(MATH_LIBS)
 
 mfschunktool_SOURCES= \
 	mfschunktool.c \
@@ -53,6 +55,6 @@ mfschunktool_SOURCES= \
 	../mfscommon/datapack.h \
 	../mfscommon/MFSCommunication.h
 
-distclean:distclean-am
+distclean-local:distclean-am
 	-rm -rf ./$(DEPDIR)
 	-rm -f Makefile

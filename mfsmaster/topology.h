@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -23,6 +23,11 @@
 
 #include <inttypes.h>
 
+#define TOPOLOGY_DIST_SAME_IP 0
+#define TOPOLOGY_DIST_SAME_RACKID 1
+#define TOPOLOGY_DIST_MAX 2
+
+uint32_t topology_get_rackid(uint32_t ip);
 uint8_t topology_distance(uint32_t ip1,uint32_t ip2);
 int topology_init(void);
 

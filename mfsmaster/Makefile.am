@@ -41,9 +41,11 @@ mfsmaster_SOURCES=\
 	matomlserv.c matomlserv.h \
 	datacachemgr.c datacachemgr.h \
 	chartsdata.c chartsdata.h \
+	bgsaver.c bgsaver.h \
 	chartsdefs.h \
 	init.h \
 	../mfscommon/main.c ../mfscommon/main.h \
+	../mfscommon/processname.c ../mfscommon/processname.h \
 	../mfscommon/cfg.c ../mfscommon/cfg.h \
 	../mfscommon/random.c ../mfscommon/random.h \
 	../mfscommon/md5.c ../mfscommon/md5.h \
@@ -62,7 +64,8 @@ mfsmaster_SOURCES=\
 	../mfscommon/slogger.h ../mfscommon/mfsstrerr.h \
 	../mfscommon/hashfn.h ../mfscommon/median.h \
 	../mfscommon/buckets.h ../mfscommon/mfsalloc.h \
-	../mfscommon/glue.h ../mfscommon/MFSCommunication.h
+	../mfscommon/glue.h ../mfscommon/sizestr.h \
+	../mfscommon/MFSCommunication.h
 
 
 mfsmaster_CPPFLAGS=$(AM_CPPFLAGS) -DMFSMAXFILES=16384 -DAPPNAME=mfsmaster
@@ -73,6 +76,6 @@ EXTRA_DIST = $(sbin_SCRIPTS)
 sbin_SCRIPTS=\
 	mfsmetarestore
 
-distclean:distclean-am
+distclean-local:distclean-am
 	-rm -rf ./$(DEPDIR)
 	-rm -f Makefile

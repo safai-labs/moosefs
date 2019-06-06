@@ -6,6 +6,7 @@ import posix
 import time
 import signal
 import os
+import pwd
 import sys
 import getopt
 import traceback
@@ -21,8 +22,8 @@ import socket
 import select
 import subprocess
 
-"""Http server based on recipes 511453,511454 from code.activestate.com by Pierre Quentel"""
-"""Added support for indexes, access tests, proper handle of SystemExit exception, fixed couple of errors and vulnerbilities, getopt, lockfiles, daemonize etc. by Jakub Kruszona-Zawadzki"""
+# Http server based on recipes 511453,511454 from code.activestate.com by Pierre Quentel"""
+# Added support for indexes, access tests, proper handle of SystemExit exception, fixed couple of errors and vulnerbilities, getopt, lockfiles, daemonize etc. by Jakub Kruszona-Zawadzki
 
 # the dictionary holding one client handler for each connected client
 # key = client socket, value = instance of (a subclass of) ClientHandler
@@ -43,7 +44,7 @@ else:
 # The server class. Creating an instance starts a server on the specified
 # host and port
 # =======================================================================
-class Server:
+class Server(object):
 	def __init__(self,host='localhost',port=80):
 		if host=='any':
 			host=''
@@ -58,7 +59,7 @@ class Server:
 # Generic client handler. An instance of this class is created for each
 # request sent by a client to the server
 # =====================================================================
-class ClientHandler:
+class ClientHandler(object):
 	blocksize = 2048
 
 	def __init__(self, server, client_socket, client_address):
@@ -71,6 +72,7 @@ class ClientHandler:
 		self.outgoing = emptybuff()
 		self.writable = False
 		self.close_when_done = True
+		self.response = []
  
 	def handle_error(self):
 		self.close()
@@ -81,9 +83,10 @@ class ClientHandler:
 			buff = self.client_socket.recv(1024)
 			if not buff:  # the connection is closed
 				self.close()
-			# buffer the data in self.incoming
-			self.incoming += buff #.write(buff)
-			self.process_incoming()
+			else:
+				# buffer the data in self.incoming
+				self.incoming += buff #.write(buff)
+				self.process_incoming()
 		except socket.error:
 			self.close()
 
@@ -118,6 +121,7 @@ class ClientHandler:
 			else:
 				self.outgoing = self.response[0].read(self.blocksize)
 				if not self.outgoing:
+					self.response[0].close()
 					self.response.pop(0)
 		if self.outgoing:
 			try:
@@ -138,6 +142,10 @@ class ClientHandler:
 				self.incoming = emptybuff()
 
 	def close(self):
+		while self.response:
+			if not isinstance(self.response[0],buff_type):
+				self.response[0].close()
+			self.response.pop(0)
 		del client_handlers[self.client_socket]
 		self.client_socket.close()
 
@@ -188,6 +196,19 @@ class HTTP(ClientHandler):
 	logging = True					# print logging info for each request ?
 	blocksize = 2 << 16				# size of blocks to read from files and send
 
+	def __init__(self, server, client_socket, client_address):
+		super(HTTP,self).__init__(server, client_socket, client_address)
+		self.method = None
+		self.protocol = None
+		self.postbody = None
+		self.requestline = None
+		self.headers = None
+		self.url = None
+		self.file_name = None
+		self.path = None
+		self.rest = None
+		self.mngt_method = None
+
 	def request_complete(self):
 		"""In the HTTP protocol, a request is complete if the "end of headers"
 		sequence ('\r\n\r\n') has been received
@@ -211,7 +232,7 @@ class HTTP(ClientHandler):
 				self.protocol = "HTTP/1.1"
 				self.postbody = None
 				return True
-		except:
+		except Exception:
 			self.method = None
 			self.protocol = "HTTP/1.1"
 			self.postbody = None
@@ -226,7 +247,7 @@ class HTTP(ClientHandler):
 		if (self.protocol == "HTTP/1.1" and close_conn.lower() == "keep-alive"):
 			self.close_when_done = False
 		# parse the url
-		scheme,netloc,path,params,query,fragment = urlparse(self.url)
+		_,_,path,params,query,fragment = urlparse(self.url)
 		self.path,self.rest = path,(params,query,fragment)
 
 		if self.method == 'POST':
@@ -244,11 +265,11 @@ class HTTP(ClientHandler):
 		return True
 
 	def make_response(self):
-#		try:
-			"""Build the response : a list of strings or files"""
+		"""Build the response : a list of strings or files"""
+		try:
 			if self.method is None: # bad request
 				return self.err_resp(400,'Bad request : %s' %self.requestline)
-			resp_headers, resp_body, resp_file = '','',None
+			resp_headers, resp_file = '',None
 			if not self.method in ['GET','POST','HEAD']:
 				return self.err_resp(501,'Unsupported method (%s)' %self.method)
 			else:
@@ -292,8 +313,8 @@ class HTTP(ClientHandler):
 						response.append(resp_file)
 			self.log(200)
 			return response
-#		except:
-#			return self.err_resp(500,'Internal Server Error')
+		except Exception:
+			return self.err_resp(500,'Internal Server Error')
 
 	def translate_path(self):
 		"""Translate URL path into a path in the file system"""
@@ -327,7 +348,7 @@ class HTTP(ClientHandler):
 				response = cgiout + cgierr
 				if sys.version>='3':
 					response = response.decode('latin-1')
-			except:
+			except Exception:
 				response = "Content-type: text/plain\r\n\r\n" + traceback.format_exc()
 			# for HEAD request, don't send message body even if the script
 			# returns one (RFC 3875)
@@ -361,7 +382,7 @@ class HTTP(ClientHandler):
 					if sys.version>='3':
 						resp_line = resp_line.encode('ascii')
 					return [resp_line,proc.stdout,proc.stderr]
-			except:
+			except Exception:
 				response = "Content-type: text/plain\r\n\r\n" + traceback.format_exc()
 				resp_line = "%s 200 Ok\r\n" %self.protocol
 				if sys.version>='3':
@@ -531,7 +552,7 @@ if __name__=="__main__":
 			mode = 3
 		else:
 			mode = 0
-	except:
+	except Exception:
 		mode = 0
 
 	rootpath = os.path.realpath(rootpath)
@@ -552,12 +573,12 @@ if __name__=="__main__":
 		try:
 			pid = os.fork()
 		except OSError:
-			e = sys.exc_info()[1]
-			raise Exception("fork error: %s [%d]" % (e.strerror, e.errno))
 			if sys.version_info[0]<3:
 				posix.write(pipefd[1],'0')
 			else:
 				posix.write(pipefd[1],bytes(1))
+			e = sys.exc_info()[1]
+			raise Exception("fork error: %s [%d]" % (e.strerror, e.errno))
 		if pid>0:
 			os._exit(0)
 
@@ -595,6 +616,14 @@ if __name__=="__main__":
 		else:
 			HTTP.logging = False
 		HTTP.root = rootpath
+		try:
+			os.seteuid(pwd.getpwnam("mfs").pw_uid)
+		except Exception:
+			try:
+				os.seteuid(pwd.getpwnam("nobody").pw_uid)
+			except Exception:
+				pass
+		signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 		loop(server,HTTP)
 
 	else:
